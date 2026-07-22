@@ -80,8 +80,9 @@ install_system() {
   log "dnf: system packages"
   # NOTE: don't install 'curl' — AL2023 ships curl-minimal which provides the binary;
   # asking for 'curl' triggers a conflict. tar/gzip already present.
-  dnf install -y python3 python3-pip python3-devel gcc gcc-c++ make git >/dev/null
-  ok "base packages installed ($(python3 --version))"
+  # AL2023's default python3 is 3.9; boto3>=1.43 and mcp>=1.9 need >=3.10 → use 3.11.
+  dnf install -y python3.11 python3.11-pip python3.11-devel gcc gcc-c++ make git >/dev/null
+  ok "base packages installed ($(python3.11 --version))"
 
   if ! command -v caddy >/dev/null; then
     log "install Caddy (static binary + systemd — no dnf repo on AL2023)"
@@ -142,7 +143,7 @@ install_openclaw() {
 # ---- python venv -----------------------------------------------------------
 install_python() {
   log "python venv + requirements"
-  sudo -u "$APP_USER" python3 -m venv "$APP_DIR/.venv"
+  sudo -u "$APP_USER" python3.11 -m venv --clear "$APP_DIR/.venv"
   sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install --upgrade pip -q
   sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt" -q
   ok "dependencies installed"

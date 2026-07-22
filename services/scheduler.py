@@ -27,15 +27,28 @@ async def rotate_account():
     await write("UPDATE credentials SET is_active=1 WHERE id=?", (nxt,))
 
 
+def _now_hms():
+    return datetime.now(IST).strftime("%H:%M:%S")
+
+
 async def one_scrape():
     t0 = time.time()
     print(f"\n{'='*60}", flush=True)
+
+    run_trace = [{"at": _now_hms(), "phase": "queued", "status": "info",
+                  "message": "Scrape job accepted by scheduler"}]
+
+    def rt(phase, status, message, detail=None):
+        run_trace.append({"at": _now_hms(), "phase": phase, "status": status,
+                          "message": message, "detail": detail})
 
     try:
         creds = await read("SELECT * FROM credentials WHERE is_active=1 LIMIT 1")
         if not creds:
             creds = await read("SELECT * FROM credentials LIMIT 1")
         cred = creds[0] if creds else None
+        rt("account", "ok" if cred else "warn",
+           f"Assigned {cred['label']}" if cred else "No credential configured")
 
         urls = await read("SELECT * FROM urls WHERE status='pending' ORDER BY id LIMIT 1")
         if not urls:
@@ -62,13 +75,15 @@ async def one_scrape():
         user = cred["username"] if cred else None
         pw = cred["password"] if cred else None
         result = await asyncio.to_thread(scrape_note, url["source_url"], user, pw)
+        run_trace.extend(result.get("trace") or [])
 
         if not result["success"]:
             log(f"❌ FAILED: {result['error']}")
             await write("UPDATE urls SET status='failed', error_message=? WHERE id=?", (result["error"], url["id"]))
             await write(
-                "INSERT INTO scrape_log(url_id,source_id,status,duration_ms,error_message) VALUES(?,?,?,?,?)",
-                (url["id"], url["source_id"], "failed", int((time.time() - t0) * 1000), result["error"]),
+                "INSERT INTO scrape_log(url_id,source_id,status,duration_ms,error_message,trace) VALUES(?,?,?,?,?,?)",
+                (url["id"], url["source_id"], "failed", int((time.time() - t0) * 1000),
+                 result["error"], _json.dumps(run_trace)),
             )
             return
 
@@ -76,13 +91,22 @@ async def one_scrape():
         await asyncio.sleep(5)
 
         log("LLM summarizing...")
+        rt("summarize", "info", "Sending article to LLM for summarization")
         try:
             summary = await summarize(result["clean_text"] or result["raw_text"])
             log(f"  → {summary.get('title','')[:60]}")
             log(f"  → {summary.get('family','')} / {summary.get('type','')}")
+            rt("summarize", "ok", f"LLM produced: {summary.get('title','')[:60]}",
+               f"{summary.get('family','')} / {summary.get('type','')}")
         except Exception as e:
             log(f"❌ LLM failed: {e}")
+            rt("summarize", "error", "LLM summarization failed", str(e))
             await write("UPDATE urls SET status='failed', error_message=? WHERE id=?", (f"LLM:{e}", url["id"]))
+            await write(
+                "INSERT INTO scrape_log(url_id,source_id,status,duration_ms,error_message,trace) VALUES(?,?,?,?,?,?)",
+                (url["id"], url["source_id"], "failed", int((time.time() - t0) * 1000),
+                 f"LLM:{e}", _json.dumps(run_trace)),
+            )
             return
         await asyncio.sleep(5)
 
@@ -105,9 +129,12 @@ async def one_scrape():
              url.get("component"), s(summary.get("environment", "[]")), now, now),
         )
         await write("UPDATE urls SET status='completed', scraped_at=? WHERE id=?", (now, url["id"]))
+        rt("store", "ok", "Summary stored in knowledge base", "action: create")
+        rt("done", "ok", "Run completed successfully")
         await write(
-            "INSERT INTO scrape_log(url_id,source_id,status,action,duration_ms) VALUES(?,?,?,?,?)",
-            (url["id"], url["source_id"], "success", "create", int((time.time() - t0) * 1000)),
+            "INSERT INTO scrape_log(url_id,source_id,status,action,duration_ms,trace) VALUES(?,?,?,?,?,?)",
+            (url["id"], url["source_id"], "success", "create", int((time.time() - t0) * 1000),
+             _json.dumps(run_trace)),
         )
 
         dur = int((time.time() - t0) * 1000)

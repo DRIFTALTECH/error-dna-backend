@@ -11,13 +11,37 @@ import json
 import subprocess
 import time
 import logging
+from datetime import datetime, timezone, timedelta
 
 from config import PREFERRED_SUSER
 
 logger = logging.getLogger(__name__)
+IST = timezone(timedelta(hours=5, minutes=30))
 
-MAX_STEPS = 14          # hard cap so a redirect loop can't spin forever
+MAX_STEPS = 18          # hard cap so a redirect loop can't spin forever
 STEP_COOLDOWN = 5       # openclaw cooldown after each browser command
+MAX_LOADING_WAITS = 6   # extra probes to allow while a page is still rendering
+
+
+def _ts() -> str:
+    return datetime.now(IST).strftime("%H:%M:%S")
+
+
+# Placeholder/skeleton markers — a page that shows these hasn't rendered yet.
+_LOADING_KW = ("not shown", "please wait", "loading…", "loading...", "just a moment",
+               "header title", "header subtitle")
+
+
+def _looks_loading(sig: dict) -> bool:
+    """True if the page is a still-rendering skeleton, not a real state to act on."""
+    lc = (sig.get("lc", "") or "")
+    head = (sig.get("heading", "") or "").lower()
+    if any(k in lc or k in head for k in _LOADING_KW):
+        return True
+    # Near-empty page with no form and no tiles = almost certainly mid-navigation.
+    return (sig.get("len", 0) < 120 and not sig.get("hasPass")
+            and not sig.get("hasUser") and not sig.get("suserTiles")
+            and not sig.get("acctTiles"))
 
 
 def _run(cmd: list, timeout: int = 30) -> tuple[bool, str]:
@@ -51,6 +75,7 @@ _PROBE_FN = r"""()=>{
   const clean = e => (e.textContent||'').replace(/\s+/g,' ').trim();
   const userIsh = i => /user|email|login/i.test((i.name||'')+(i.id||'')+(i.placeholder||'')+(i.getAttribute('aria-label')||''));
   return JSON.stringify({
+    url: location.href,
     len: txt.length,
     lc: txt.toLowerCase().slice(0, 4000),
     hasPass: vis('input[type=password]').length > 0,
@@ -139,6 +164,20 @@ def classify(sig: dict) -> str:
 
 # ---- per-state actions ----------------------------------------------------
 
+def _check_keep_signed() -> tuple[bool, str]:
+    """Tick the 'Keep me signed in' checkbox so the session persists across runs.
+
+    Prefers a checkbox labelled keep/remember/signed/stay; falls back to the sole
+    checkbox on the page. Uses .click() so the framework's handler fires.
+    """
+    fn = ("()=>{const cbs=[...document.querySelectorAll('input[type=checkbox]')].filter(e=>e.offsetParent);"
+          "const kw=/keep|remember|signed|stay/i;"
+          "for(const c of cbs){const lbl=(c.getAttribute('aria-label')||'')+(c.name||'')+(c.id||'');"
+          "if(kw.test(lbl)){if(!c.checked)c.click();return'checked'}}"
+          "if(cbs.length===1){if(!cbs[0].checked)cbs[0].click();return'only'}return'none'}")
+    return _run(["evaluate", "--fn", fn], timeout=15)
+
+
 def _click_containing(words: list, extra_js: str = "") -> tuple[bool, str]:
     """Click the first visible button/link whose text contains any of `words`."""
     arr = "[" + ",".join("'" + w.replace("'", "\\'") + "'" for w in words) + "]"
@@ -186,6 +225,7 @@ def _act(state: str, username: str, password: str) -> None:
     elif state == "login_user":
         _fill('input:not([type="password"]):not([type="hidden"]):not([type="checkbox"])', username or "")
         time.sleep(2)
+        _check_keep_signed()   # persist session if the checkbox is on this page
         _click_containing(["continue", "next", "sign in"])
         time.sleep(5)
     elif state == "login_pass":
@@ -194,7 +234,9 @@ def _act(state: str, username: str, password: str) -> None:
         _fill('input:not([type="password"]):not([type="hidden"]):not([type="checkbox"]):not([type="submit"])', username or "")
         time.sleep(1)
         _fill('input[type="password"]', password or "")
-        time.sleep(2)
+        time.sleep(1)
+        _check_keep_signed()   # tick "Keep me signed in" before submitting
+        time.sleep(1)
         _click_containing(["continue", "sign in", "log on", "log in"])
         time.sleep(7)
     elif state == "account_select":
@@ -209,43 +251,102 @@ def _act(state: str, username: str, password: str) -> None:
         time.sleep(4)
 
 
-def _drive_to_content(url: str, username: str, password: str) -> tuple[bool, str, str]:
+_STATE_MSG = {
+    "landing": "SAP for Me landing — clicking Sign In",
+    "login_user": "Login form — entering username",
+    "login_pass": "Password form — entering credentials",
+    "account_select": "Account selection — picking S-user profile",
+    "keep_signed": "'Keep me signed in?' prompt — dismissing",
+    "consent": "Cookie/consent gate — accepting",
+    "target": "Article content reached — extracting",
+    "mfa": "MFA / OTP wall — needs a human",
+}
+
+
+def _drive_to_content(url: str, username: str, password: str) -> tuple[bool, str, str, list]:
     """Loop probe→classify→act until the target article is on screen.
 
-    Returns (ok, text, error). ok=False carries a machine-readable error:
+    Returns (ok, text, error, trace). ok=False carries a machine-readable error:
     mfa_required / needs_login (no creds) / stuck:<state> / probe_failed / max_steps.
+    `trace` is an ordered list of {at, phase, status, message, detail} steps for the UI.
     """
+    trace: list = []
+
+    def rec(phase, status, message, detail=None):
+        trace.append({"at": _ts(), "phase": phase, "status": status,
+                      "message": message, "detail": detail})
+
     last = None
     repeats = 0
+    loading_waits = 0
     for step in range(MAX_STEPS):
         sig = _probe()
         if sig is None:
-            # One retry — probes can miss a mid-navigation frame.
+            # Probes can miss a mid-navigation frame — retry twice with a pause.
+            rec("probe", "warn", f"Probe {step} returned nothing — retrying")
             time.sleep(4)
-            sig = _probe()
+            sig = _probe() or (time.sleep(4) or _probe())
             if sig is None:
-                return False, "", "probe_failed"
+                rec("probe", "error", "Browser probe failed after retries",
+                    "openclaw returned no DOM — is the headless browser running/logged in?")
+                return False, "", "probe_failed", trace
 
         state = classify(sig)
+        snippet = (sig.get("lc", "")[:120]).replace("\n", " ").strip()
+        cururl = sig.get("url", "")
         logger.info(f"  [step {step}] state={state} len={sig.get('len')} "
                     f"tiles={len(sig.get('suserTiles', []))}")
+        detail = f"url={cururl} len={sig.get('len')} · {snippet}" if cururl else f"len={sig.get('len')} · {snippet}"
 
         if state == "target":
+            # Guard against a stale-DOM race: during navigation the probe can still
+            # see the PREVIOUS note's content while the URL is already the login IdP.
+            # A real article is never on accounts.sap.com — wait it out.
+            if "accounts.sap.com" in (cururl or ""):
+                loading_waits += 1
+                rec("loading", "info", "Target-like content but still on login domain — waiting", detail)
+                if loading_waits <= MAX_LOADING_WAITS:
+                    time.sleep(5)
+                    continue
+            rec("extract", "ok", _STATE_MSG["target"], detail)
             ok, text = _get_text()
-            return (True, text, "") if ok and text else (False, "", "extraction_failed")
+            # Page may still be settling when it first matches — retry a few times.
+            tries = 0
+            while (not ok or not text or len(text) < 100) and tries < 3:
+                tries += 1
+                rec("extract", "info", f"Content thin ({len((text or '').strip())} chars) — waiting (retry {tries})")
+                time.sleep(5)
+                ok, text = _get_text()
+            if ok and text and len(text.strip()) >= 100:
+                rec("done", "ok", f"Extracted {len(text)} chars")
+                return True, text, "", trace
+            rec("done", "error", "Extraction failed — page matched but content too thin", detail)
+            return False, "", "extraction_failed", trace
 
         if state == "mfa":
-            return False, "", "mfa_required"
+            rec("mfa", "error", _STATE_MSG["mfa"], detail)
+            return False, "", "mfa_required", trace
 
         needs_creds = state in ("landing", "login_user", "login_pass")
         if needs_creds and (not username or not password):
-            return False, "", "needs_login"
+            rec("login", "error", "Login required but no credentials for this account", detail)
+            return False, "", "needs_login", trace
+
+        # Still-rendering skeleton — wait it out instead of calling it stuck.
+        if state == "unknown" and _looks_loading(sig):
+            loading_waits += 1
+            rec("loading", "info", f"Page still rendering (wait {loading_waits}/{MAX_LOADING_WAITS})", detail)
+            if loading_waits <= MAX_LOADING_WAITS:
+                time.sleep(6)
+                continue
+            rec("done", "error", "Page never finished loading", detail)
+            return False, "", f"stuck:loading:{snippet}", trace
 
         if state == "unknown":
             repeats += 1
-            if repeats >= 2:
-                snippet = (sig.get("lc", "")[:80]).replace("\n", " ")
-                return False, "", f"stuck:{snippet}"
+            rec("unknown", "warn", f"Unrecognized page (attempt {repeats})", detail)
+            if repeats >= 3:
+                return False, "", f"stuck:{snippet}", trace
             time.sleep(5)
             continue
 
@@ -253,11 +354,14 @@ def _drive_to_content(url: str, username: str, password: str) -> tuple[bool, str
         repeats = repeats + 1 if state == last else 0
         last = state
         if repeats >= 3:
-            return False, "", f"stuck:{state}"
+            rec("done", "error", f"Stuck on '{state}' — not advancing", detail)
+            return False, "", f"stuck:{state}", trace
 
+        rec(state, "ok", _STATE_MSG.get(state, f"Handling {state}"), detail)
         _act(state, username, password)
 
-    return False, "", "max_steps"
+    rec("done", "error", "Gave up after max steps", f"MAX_STEPS={MAX_STEPS}")
+    return False, "", "max_steps", trace
 
 
 # Post-auth signals only. NOT consent — a cookie/privacy banner shows pre-login,
@@ -350,18 +454,25 @@ def scrape_note(url: str, username: str = None, password: str = None) -> dict:
     Scrape a SAP note. Drives through login/account-select/consent as needed.
     Returns { success, raw_text, clean_text, title, error }.
     """
-    _run(["navigate", url], timeout=30)
+    nav_ok, _ = _run(["navigate", url], timeout=30)
     time.sleep(5)
+    nav_step = [{"at": _ts(), "phase": "navigate",
+                 "status": "ok" if nav_ok else "error",
+                 "message": f"Opened {url}" if nav_ok else "Navigate command failed",
+                 "detail": None if nav_ok else "openclaw browser navigate returned non-zero"}]
 
-    ok, text, err = _drive_to_content(url, username, password)
+    ok, text, err, trace = _drive_to_content(url, username, password)
+    trace = nav_step + trace
     if not ok:
         # Preserve the old error vocabulary the scheduler/UI already understand.
         mapped = {"needs_login": "session_expired"}.get(err, err)
         logger.warning(f"  ⚠️ drive failed: {mapped}")
-        return {"success": False, "error": mapped}
+        return {"success": False, "error": mapped, "trace": trace}
 
     if len(text) < 100:
-        return {"success": False, "error": "too_short", "raw_text": text}
+        trace.append({"at": _ts(), "phase": "done", "status": "error",
+                      "message": "Extracted text too short", "detail": f"{len(text)} chars"})
+        return {"success": False, "error": "too_short", "raw_text": text, "trace": trace}
 
     # ---- extract sections from the raw text (unchanged) ----
     lines = text.split("\n")
@@ -398,12 +509,16 @@ def scrape_note(url: str, username: str = None, password: str = None) -> dict:
     clean_text = "\n\n".join(clean) if clean else text
 
     logger.info(f"  ✅ Scraped {len(text)} chars, title: {title[:60]}")
+    trace.append({"at": _ts(), "phase": "parse", "status": "ok",
+                  "message": f"Parsed article: {title[:60]}" if title else "Parsed article",
+                  "detail": f"{len(clean_text)} chars cleaned"})
 
     return {
         "success": True,
         "raw_text": text,
         "clean_text": clean_text,
         "title": title,
+        "trace": trace,
     }
 
 

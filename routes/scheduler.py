@@ -1,5 +1,6 @@
 """Scheduler control routes — status, config, pause/resume, scrape-now, rotate, logs."""
 
+import json
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Query
 from db import read, write
@@ -104,20 +105,30 @@ def _log_to_ui(row: dict, account: str) -> dict:
     ts = row.get("created_at") or ""
     err = row.get("error_message")
 
-    trace = [
-        {"at": ts, "phase": "queued", "status": "info", "message": "Scrape job accepted by scheduler"},
-        {"at": ts, "phase": "account", "status": "ok", "message": f"Assigned {account}"},
-    ]
-    if status == "failed":
-        trace.append({"at": ts, "phase": "fetch", "status": "error",
-                      "message": f"Fetch note {note} failed", "detail": err or "Unknown error"})
-        trace.append({"at": ts, "phase": "done", "status": "error", "message": "Run finished with failure"})
-    else:
-        action = row.get("action") or "stored"
-        trace.append({"at": ts, "phase": "fetch", "status": "ok", "message": f"Fetched note {note}"})
-        trace.append({"at": ts, "phase": "store", "status": "ok",
-                      "message": "Summary stored in knowledge base", "detail": f"action: {action}"})
-        trace.append({"at": ts, "phase": "done", "status": "ok", "message": "Run completed successfully"})
+    # Prefer the REAL per-step trace captured during the run; synthesize only for
+    # legacy rows written before the trace column existed.
+    trace = None
+    stored = row.get("trace")
+    if stored:
+        try:
+            trace = json.loads(stored) if isinstance(stored, str) else stored
+        except (json.JSONDecodeError, TypeError):
+            trace = None
+    if not trace:
+        trace = [
+            {"at": ts, "phase": "queued", "status": "info", "message": "Scrape job accepted by scheduler"},
+            {"at": ts, "phase": "account", "status": "ok", "message": f"Assigned {account}"},
+        ]
+        if status == "failed":
+            trace.append({"at": ts, "phase": "fetch", "status": "error",
+                          "message": f"Fetch note {note} failed", "detail": err or "Unknown error"})
+            trace.append({"at": ts, "phase": "done", "status": "error", "message": "Run finished with failure"})
+        else:
+            action = row.get("action") or "stored"
+            trace.append({"at": ts, "phase": "fetch", "status": "ok", "message": f"Fetched note {note}"})
+            trace.append({"at": ts, "phase": "store", "status": "ok",
+                          "message": "Summary stored in knowledge base", "detail": f"action: {action}"})
+            trace.append({"at": ts, "phase": "done", "status": "ok", "message": "Run completed successfully"})
 
     return {
         "id": row["id"],

@@ -185,6 +185,8 @@ async def init_db():
     conn = await _connect()
     try:
         await conn.execute(SCHEMA)
+        # Added after scrape_log shipped — store the full per-run step trace as JSON.
+        await conn.execute("ALTER TABLE scrape_log ADD COLUMN IF NOT EXISTS trace TEXT;")
         await conn.execute(FAMILIES_SEED)
         await conn.execute(SCHEDULER_SEED)
         await conn.execute(FIX_SEQUENCES)
