@@ -78,7 +78,9 @@ preflight() {
 # ---- system deps -----------------------------------------------------------
 install_system() {
   log "dnf: system packages"
-  dnf install -y python3 python3-pip python3-devel gcc gcc-c++ make curl git tar >/dev/null
+  # NOTE: don't install 'curl' — AL2023 ships curl-minimal which provides the binary;
+  # asking for 'curl' triggers a conflict. tar/gzip already present.
+  dnf install -y python3 python3-pip python3-devel gcc gcc-c++ make git >/dev/null
   ok "base packages installed ($(python3 --version))"
 
   if ! command -v caddy >/dev/null; then
