@@ -1,0 +1,151 @@
+"""Scheduler — picks URL, scrapes (auto-login), summarizes, saves."""
+
+import asyncio, random, time, json as _json, logging
+from datetime import datetime, timezone, timedelta
+
+from db import read, write
+from services.scraper import scrape_note
+from services.summarizer import summarize
+
+logger = logging.getLogger(__name__)
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def log(msg: str):
+    print(f"  {msg}", flush=True)
+
+
+async def rotate_account():
+    """Activate the next credential after the current active one (wraps)."""
+    rows = await read("SELECT id, is_active FROM credentials ORDER BY id")
+    if not rows:
+        return
+    ids = [r["id"] for r in rows]
+    active = next((r["id"] for r in rows if r["is_active"]), ids[0])
+    nxt = ids[(ids.index(active) + 1) % len(ids)]
+    await write("UPDATE credentials SET is_active=0")
+    await write("UPDATE credentials SET is_active=1 WHERE id=?", (nxt,))
+
+
+async def one_scrape():
+    t0 = time.time()
+    print(f"\n{'='*60}", flush=True)
+
+    try:
+        creds = await read("SELECT * FROM credentials WHERE is_active=1 LIMIT 1")
+        if not creds:
+            creds = await read("SELECT * FROM credentials LIMIT 1")
+        cred = creds[0] if creds else None
+
+        urls = await read("SELECT * FROM urls WHERE status='pending' ORDER BY id LIMIT 1")
+        if not urls:
+            print("✅ Queue empty", flush=True)
+            return
+        url = urls[0]
+        log(f"URL #{url['source_id']}: {url.get('title','')[:60]}")
+        await asyncio.sleep(5)
+
+        ex = await read(
+            "SELECT id,source_version FROM summaries WHERE source_id=? AND is_latest=1",
+            (url["source_id"],),
+        )
+        if ex and (ex[0]["source_version"] or 0) >= 1:
+            await write("UPDATE urls SET status='skipped' WHERE id=?", (url["id"],))
+            log(f"⏭ SKIP: already have v{ex[0]['source_version']}")
+            return
+        await asyncio.sleep(5)
+
+        await write("UPDATE urls SET status='scraping' WHERE id=?", (url["id"],))
+        await asyncio.sleep(5)
+
+        log(f"Scraping... {url['source_url'][:60]}")
+        user = cred["username"] if cred else None
+        pw = cred["password"] if cred else None
+        result = await asyncio.to_thread(scrape_note, url["source_url"], user, pw)
+
+        if not result["success"]:
+            log(f"❌ FAILED: {result['error']}")
+            await write("UPDATE urls SET status='failed', error_message=? WHERE id=?", (result["error"], url["id"]))
+            await write(
+                "INSERT INTO scrape_log(url_id,source_id,status,duration_ms,error_message) VALUES(?,?,?,?,?)",
+                (url["id"], url["source_id"], "failed", int((time.time() - t0) * 1000), result["error"]),
+            )
+            return
+
+        log(f"✅ {len(result.get('clean_text',''))} chars cleaned")
+        await asyncio.sleep(5)
+
+        log("LLM summarizing...")
+        try:
+            summary = await summarize(result["clean_text"] or result["raw_text"])
+            log(f"  → {summary.get('title','')[:60]}")
+            log(f"  → {summary.get('family','')} / {summary.get('type','')}")
+        except Exception as e:
+            log(f"❌ LLM failed: {e}")
+            await write("UPDATE urls SET status='failed', error_message=? WHERE id=?", (f"LLM:{e}", url["id"]))
+            return
+        await asyncio.sleep(5)
+
+        def s(v):
+            if v is None:
+                return ""
+            if isinstance(v, (list, dict)):
+                return _json.dumps(v)
+            return str(v)
+
+        now = datetime.now(IST).isoformat()
+        await write(
+            """INSERT INTO summaries(source_id,url_id,title,family,area,type,issue,summary,steps,gotchas,tags,
+               source_version,source_date,source_url,component,environment,is_latest,verification_status,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'current',?,?)""",
+            (url["source_id"], url["id"], s(summary.get("title")), s(summary.get("family")),
+             s(summary.get("area")), s(summary.get("type")), s(summary.get("issue")),
+             s(summary.get("summary")), s(summary.get("steps")), s(summary.get("gotchas")),
+             s(summary.get("tags")), 1, url.get("released_on"), url["source_url"],
+             url.get("component"), s(summary.get("environment", "[]")), now, now),
+        )
+        await write("UPDATE urls SET status='completed', scraped_at=? WHERE id=?", (now, url["id"]))
+        await write(
+            "INSERT INTO scrape_log(url_id,source_id,status,action,duration_ms) VALUES(?,?,?,?,?)",
+            (url["id"], url["source_id"], "success", "create", int((time.time() - t0) * 1000)),
+        )
+
+        dur = int((time.time() - t0) * 1000)
+        print(f"✅ SAVED #{url['source_id']} [{dur}ms]", flush=True)
+        print(f"   {summary.get('title','')[:80]}", flush=True)
+        print(f"   {summary.get('family','')}", flush=True)
+
+    except Exception as e:
+        logger.exception(f"Fatal: {e}")
+
+
+async def loop():
+    while True:
+        try:
+            cfg = (await read("SELECT is_paused, min_delay_min, max_delay_min, next_scrape_at FROM scheduler_config WHERE id=1"))[0]
+            paused, min_d, max_d, next_at = cfg["is_paused"], cfg["min_delay_min"], cfg["max_delay_min"], cfg["next_scrape_at"]
+
+            if not paused:
+                should = True
+                if next_at:
+                    try:
+                        if datetime.now(IST) < datetime.fromisoformat(next_at):
+                            should = False
+                    except Exception:
+                        pass
+                if should:
+                    await one_scrape()
+                    delay = random.randint(min_d, max_d) * 60
+                    next_t = (datetime.now(IST) + timedelta(seconds=delay)).isoformat()
+                    await write("UPDATE scheduler_config SET next_scrape_at=? WHERE id=1", (next_t,))
+                    log(f"⏱ Next in {delay//60}min")
+
+            await asyncio.sleep(30)
+        except Exception as e:
+            logger.exception(f"Loop: {e}")
+            await asyncio.sleep(60)
+
+
+async def start():
+    asyncio.create_task(loop())
+    logger.info("🚀 Scheduler started")
