@@ -56,7 +56,11 @@ _PROBE_FN = r"""()=>{
     hasPass: vis('input[type=password]').length > 0,
     hasUser: vis('input:not([type=password]):not([type=hidden]):not([type=checkbox]):not([type=submit])').some(userIsh)
              || /email, user id/i.test(txt),
-    suserTiles: vis('button,a,li,[role=button],[tabindex]').map(clean).filter(t => /\bS\d{7,}\b/i.test(t)).slice(0, 8),
+    heading: (vis('h1,h2,[role=heading]').map(clean).filter(Boolean)[0] || '').slice(0, 120),
+    // S-user id tiles (S + 6+ digits) — the ideal signal.
+    suserTiles: vis('button,a,li,[role=button],[tabindex],[role=listitem],[role=option]').map(clean).filter(t => /\bS\d{6,}\b/i.test(t)).slice(0, 8),
+    // Broader account-chooser tiles: short clickable rows carrying an S-id OR an email.
+    acctTiles: vis('li,[role=listitem],[role=option],button,a,[tabindex]').map(clean).filter(t => t && t.length < 80 && (/\bS\d{6,}\b/i.test(t) || /@/.test(t))).slice(0, 8),
     btns: vis('button,a[role=button],[role=button]').map(clean).filter(Boolean).slice(0, 60)
   });
 }"""
@@ -82,6 +86,9 @@ def _probe() -> dict | None:
 
 _MFA_KW = ("verification code", "one-time passcode", "one time passcode", "authenticator app",
            "two-factor", "2-step", "enter the code", "otp")
+_ACCT_KW = ("account selection", "choose an account", "select an account", "choose account",
+            "select account", "continue as", "choose a profile", "select a profile",
+            "which account", "pick an account", "use another account")
 _LANDING_KW = ("say hello", "digital companion", "sap for me")
 _TARGET_KW = ("symptom", "resolution")
 
@@ -107,8 +114,12 @@ def classify(sig: dict) -> str:
     # MFA / OTP — a human must clear this; we can't.
     if any(k in lc for k in _MFA_KW):
         return "mfa"
-    # Profile chooser: the explicit phrase, or clickable S-user tiles present.
-    if "account selection" in lc or sig.get("suserTiles"):
+    # Profile chooser: explicit phrase, S-user/email tiles, or a "choose account" heading.
+    # Checked before login_pass/login_user so the post-auth chooser wins over stray inputs.
+    head_lc = (sig.get("heading", "") or "").lower()
+    if (sig.get("suserTiles") or sig.get("acctTiles")
+            or "account selection" in lc
+            or any(k in head_lc + " " + lc for k in _ACCT_KW)):
         return "account_select"
     if sig.get("hasPass"):
         return "login_pass"
@@ -148,15 +159,21 @@ def _fill(selector: str, value: str) -> tuple[bool, str]:
 
 
 def _pick_suser() -> tuple[bool, str]:
-    """Click the S-user profile tile. Prefer PREFERRED_SUSER; else any S+7digits tile."""
+    """Click the S-user profile tile. Prefer PREFERRED_SUSER; else any S-user tile.
+
+    SAP nests the account as UL>LI>BUTTON — the LI wrapper also carries the id text
+    but has no click handler. So we only scan genuinely interactive nodes and, if the
+    match sits on an inner node, climb to the closest button/a/[role=button] to click.
+    """
     want = (PREFERRED_SUSER or "").upper().replace("'", "")
     fn = ("()=>{const want='" + want + "';"
-          "const cs=[...document.querySelectorAll('button,a,li,[role=button],[tabindex],div[role=listitem]')]"
+          "const cs=[...document.querySelectorAll('button,a,[role=button],[tabindex]')]"
           ".filter(e=>e.offsetParent);"
           "const tx=e=>(e.textContent||'').replace(/\\s+/g,' ').trim().toUpperCase();"
-          "if(want){for(const e of cs){if(tx(e).includes(want)){e.click();return'exact'}}}"
-          "for(const e of cs){if(/\\bS\\d{7,}\\b/.test(tx(e))){e.click();return'suser'}}"
-          "for(const e of cs){if(/S[-\\s]?USER/.test(tx(e))){e.click();return'label'}}"
+          "const clk=e=>{const b=e.closest('button,a,[role=button]')||e;b.click();};"
+          "if(want){for(const e of cs){if(tx(e).includes(want)){clk(e);return'exact'}}}"
+          "for(const e of cs){if(/\\bS\\d{6,}\\b/.test(tx(e))){clk(e);return'suser'}}"
+          "for(const e of cs){if(/S[-\\s]?USER/.test(tx(e))){clk(e);return'label'}}"
           "return'none'}")
     return _run(["evaluate", "--fn", fn], timeout=15)
 
@@ -172,6 +189,10 @@ def _act(state: str, username: str, password: str) -> None:
         _click_containing(["continue", "next", "sign in"])
         time.sleep(5)
     elif state == "login_pass":
+        # Some SAP tenants show user + password on ONE page (j_username + j_password).
+        # Fill the user field too if present — a no-op on password-only pages.
+        _fill('input:not([type="password"]):not([type="hidden"]):not([type="checkbox"]):not([type="submit"])', username or "")
+        time.sleep(1)
         _fill('input[type="password"]', password or "")
         time.sleep(2)
         _click_containing(["continue", "sign in", "log on", "log in"])
@@ -393,7 +414,12 @@ if __name__ == "__main__":
         ({"len": 200, "lc": "please enter the verification code", "btns": []}, "mfa"),
         ({"len": 300, "lc": "account selection", "suserTiles": ["S0012345678 Lokesh"], "btns": []}, "account_select"),
         ({"len": 300, "lc": "choose a profile", "suserTiles": ["S0012345678 Lokesh"], "btns": []}, "account_select"),
+        # real SAP chooser: tiles shown by name/email (no S-id in lc), heading carries it
+        ({"len": 300, "heading": "Account selection", "lc": "email: lokesh@driftal.tech",
+          "acctTiles": ["S0028040509 Lokesh Pathangi"], "btns": []}, "account_select"),
         ({"len": 200, "lc": "enter your password", "hasPass": True, "btns": []}, "login_pass"),
+        # combined user+pass page (this tenant) — password wins, _act fills both
+        ({"len": 200, "lc": "sign in", "hasPass": True, "hasUser": True, "btns": ["Continue"]}, "login_pass"),
         ({"len": 200, "lc": "email, user id", "hasUser": True, "btns": []}, "login_user"),
         ({"len": 200, "lc": "keep me signed in?", "hasUser": False, "btns": ["Yes", "No"]}, "keep_signed"),
         ({"len": 150, "lc": "say hello ... sign in", "btns": ["Sign In"]}, "landing"),
