@@ -1,12 +1,14 @@
 """Error DNA Knowledge Base — FastAPI Backend"""
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
 from db import init_db
 from config import PORT, HOST
+from services.auth import require_auth
 from routes.health import router as health_router
+from routes.auth import router as auth_router
 from routes.urls import router as urls_router
 from routes.summaries import router as summaries_router
 from routes.credentials import router as credentials_router
@@ -48,13 +50,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount all route modules
-app.include_router(health_router)
-app.include_router(urls_router)
-app.include_router(summaries_router)
-app.include_router(credentials_router)
-app.include_router(scheduler_router)
-app.include_router(compat_router)  # /api/families — frontend-shaped adapter
+# Open routes — no token needed.
+app.include_router(health_router)   # health checks / load balancers
+app.include_router(auth_router)     # POST /api/auth/login
+
+# Everything else requires a valid Bearer token (login gates the whole app).
+_auth = [Depends(require_auth)]
+app.include_router(urls_router, dependencies=_auth)
+app.include_router(summaries_router, dependencies=_auth)
+app.include_router(credentials_router, dependencies=_auth)
+app.include_router(scheduler_router, dependencies=_auth)
+app.include_router(compat_router, dependencies=_auth)  # /api/families — frontend-shaped adapter
 
 
 if __name__ == "__main__":

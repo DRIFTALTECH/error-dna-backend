@@ -80,9 +80,10 @@ async def list_credentials():
 
 @router.post("")
 async def add_credential(body: CredentialAdd):
+    from services.crypto import encrypt
     rows = await write(
         "INSERT INTO credentials (label, login_url, username, password) VALUES (?,?,?,?) RETURNING id",
-        (_auto_label(body.username), body.login_url, body.username, body.password),
+        (_auto_label(body.username), body.login_url, body.username, encrypt(body.password)),
     )
     return {"ok": True, "id": rows[0]["id"]}
 
@@ -96,7 +97,8 @@ async def update_credential(cred_id: int, body: CredentialUpdate):
         sets.append("username=?"); params.append(body.username)
         sets.append("label=?"); params.append(_auto_label(body.username))
     if body.password:
-        sets.append("password=?"); params.append(body.password)
+        from services.crypto import encrypt
+        sets.append("password=?"); params.append(encrypt(body.password))
     if sets:
         params.append(cred_id)
         await write(f"UPDATE credentials SET {','.join(sets)} WHERE id=?", params)
@@ -129,4 +131,5 @@ async def test_credential(cred_id: int):
     if not rows:
         raise HTTPException(404, "Credential not found")
     row = rows[0]
-    return await _run_login_test(row["login_url"], row["username"], row["password"])
+    from services.crypto import decrypt
+    return await _run_login_test(row["login_url"], row["username"], decrypt(row["password"]))

@@ -130,6 +130,14 @@ CREATE TABLE IF NOT EXISTS credentials (
     created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
 );
 
+-- app_users, NOT users: a different app already owns a `users` table in this DB.
+CREATE TABLE IF NOT EXISTS app_users (
+    id SERIAL PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
+);
+
 CREATE TABLE IF NOT EXISTS scheduler_config (
     id SERIAL PRIMARY KEY,
     min_delay_min INTEGER DEFAULT 5,

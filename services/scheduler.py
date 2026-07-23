@@ -73,7 +73,10 @@ async def one_scrape():
 
         log(f"Scraping... {url['source_url'][:60]}")
         user = cred["username"] if cred else None
-        pw = cred["password"] if cred else None
+        pw = None
+        if cred:
+            from services.crypto import decrypt
+            pw = decrypt(cred["password"])
         result = await asyncio.to_thread(scrape_note, url["source_url"], user, pw)
         run_trace.extend(result.get("trace") or [])
 

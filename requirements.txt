@@ -7,3 +7,4 @@ openpyxl==3.1.5
 python-dotenv==1.2.2
 python-multipart==0.0.26
 mcp>=1.9.0
+cryptography>=44.0.0

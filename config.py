@@ -16,6 +16,13 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 DB_NAME = os.getenv("DB_NAME", "postgres")
 AWS_REGION = os.getenv("AWS_REGION", "ap-south-2")
 
+# Auth (app login). JWT_SECRET signs the session token; TTL in seconds (default 7d).
+JWT_SECRET = os.getenv("JWT_SECRET", "")
+AUTH_TOKEN_TTL = int(os.getenv("AUTH_TOKEN_TTL", str(7 * 24 * 3600)))
+
+# Reversible encryption for stored SAP account passwords (Fernet key derived from this).
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")
+
 # LLM API
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_API_URL = os.getenv("LLM_API_URL", "https://api.deepseek.com/v1/chat/completions")
