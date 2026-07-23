@@ -112,11 +112,19 @@ async def one_scrape():
         rt("account", "ok" if cred else "warn",
            f"Assigned {cred['label']}" if cred else "No credential configured")
 
-        urls = await read("SELECT * FROM urls WHERE status='pending' ORDER BY id LIMIT 1")
-        if not urls:
+        # Atomic claim — closes the race where two API processes both SELECT the
+        # same pending row during the pre-scrape sleeps and then fight over Chrome.
+        claimed = await write(
+            """UPDATE urls SET status='scraping'
+               WHERE id = (
+                 SELECT id FROM urls WHERE status='pending' ORDER BY id ASC LIMIT 1
+               )
+               RETURNING *"""
+        )
+        if not claimed:
             print("✅ Queue empty", flush=True)
             return
-        url = urls[0]
+        url = claimed[0]
         log(f"URL #{url['source_id']}: {url.get('title','')[:60]}")
         await asyncio.sleep(5)
 
@@ -128,9 +136,6 @@ async def one_scrape():
             await write("UPDATE urls SET status='skipped' WHERE id=?", (url["id"],))
             log(f"⏭ SKIP: already have v{ex[0]['source_version']}")
             return
-        await asyncio.sleep(5)
-
-        await write("UPDATE urls SET status='scraping' WHERE id=?", (url["id"],))
         await asyncio.sleep(5)
 
         log(f"Scraping... {url['source_url'][:60]}")

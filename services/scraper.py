@@ -9,6 +9,7 @@ reordering interstitial pages — the old linear script did not.
 
 import json
 import subprocess
+import threading
 import time
 import logging
 from datetime import datetime, timezone, timedelta
@@ -21,6 +22,11 @@ IST = timezone(timedelta(hours=5, minutes=30))
 MAX_STEPS = 18          # hard cap so a redirect loop can't spin forever
 STEP_COOLDOWN = 5       # openclaw cooldown after each browser command
 MAX_LOADING_WAITS = 6   # extra probes to allow while a page is still rendering
+NAV_RETRIES = 3         # openclaw navigate is flaky under load — retry before failing
+
+# One Chrome / one openclaw gateway: notes scraper, community ingest, and
+# credential test-login must never interleave browser commands.
+_BROWSER_LOCK = threading.Lock()
 
 
 def _ts() -> str:
@@ -51,16 +57,36 @@ import os as _os_run
 # node (e.g. the laptop). Empty = default profile.
 _OPENCLAW_PROFILE = _os_run.getenv("OPENCLAW_PROFILE", "").strip()
 _OPENCLAW_BASE = (["openclaw", "--profile", _OPENCLAW_PROFILE] if _OPENCLAW_PROFILE else ["openclaw"])
+# Always target the managed local profile (not chrome/user extension → laptop).
+_BROWSER_PROFILE = ["--browser-profile", "openclaw"]
 
 
 def _run(cmd: list, timeout: int = 30) -> tuple[bool, str]:
     try:
-        r = subprocess.run(_OPENCLAW_BASE + ["browser"] + cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(
+            _OPENCLAW_BASE + ["browser"] + _BROWSER_PROFILE + cmd,
+            capture_output=True, text=True, timeout=timeout,
+        )
         time.sleep(STEP_COOLDOWN)
-        return r.returncode == 0, r.stdout.strip() or r.stderr.strip()
+        out = (r.stdout or "").strip()
+        err = (r.stderr or "").strip()
+        return r.returncode == 0, out or err
     except Exception as e:
         time.sleep(STEP_COOLDOWN)
         return False, str(e)
+
+
+def _navigate(url: str, timeout: int = 30) -> tuple[bool, str]:
+    """Navigate with retries — openclaw CDP occasionally returns non-zero under contention."""
+    last = ""
+    for attempt in range(1, NAV_RETRIES + 1):
+        ok, out = _run(["navigate", url], timeout=timeout)
+        if ok:
+            return True, out
+        last = out or f"exit non-zero (attempt {attempt})"
+        logger.warning(f"  navigate attempt {attempt}/{NAV_RETRIES} failed: {last[:240]}")
+        time.sleep(3)
+    return False, last
 
 
 def _get_text() -> tuple[bool, str]:
@@ -400,6 +426,11 @@ def test_login(login_url: str, username: str, password: str) -> dict:
     Returns {ok, message, state}. MFA after accepted creds counts as ok=True
     (password was right; a human must finish).
     """
+    with _BROWSER_LOCK:
+        return _test_login_locked(login_url, username, password)
+
+
+def _test_login_locked(login_url: str, username: str, password: str) -> dict:
     url = (login_url or "https://me.sap.com").strip()
     user = (username or "").strip()
     pw = password or ""
@@ -407,7 +438,7 @@ def test_login(login_url: str, username: str, password: str) -> dict:
         return {"ok": False, "message": "Username and password required", "state": "needs_creds"}
 
     _clear_session()   # else a persisted login makes any creds look valid
-    _run(["navigate", url], timeout=30)
+    _navigate(url, timeout=30)
     time.sleep(5)
 
     last = None
@@ -557,18 +588,23 @@ def scrape_note(url: str, username: str = None, password: str = None) -> dict:
     Also downloads + extracts attachment text (best-effort) and appends it.
     Returns { success, raw_text, clean_text, title, error, trace, attachments }.
     """
+    with _BROWSER_LOCK:
+        return _scrape_note_locked(url, username, password)
+
+
+def _scrape_note_locked(url: str, username: str = None, password: str = None) -> dict:
     global _last_account
     # Account changed since last login (rotate) → drop old session, force fresh login.
     switched = bool(username) and username != _last_account
     if switched and _last_account is not None:
         _clear_session()
 
-    nav_ok, _ = _run(["navigate", url], timeout=30)
+    nav_ok, nav_out = _navigate(url, timeout=30)
     time.sleep(5)
     nav_step = [{"at": _ts(), "phase": "navigate",
                  "status": "ok" if nav_ok else "error",
                  "message": f"Opened {url}" if nav_ok else "Navigate command failed",
-                 "detail": None if nav_ok else "openclaw browser navigate returned non-zero"}]
+                 "detail": None if nav_ok else (nav_out[:300] or "openclaw browser navigate returned non-zero")}]
 
     ok, text, err, trace = _drive_to_content(url, username, password)
     trace = nav_step + trace
@@ -666,15 +702,21 @@ def scrape_community(url: str) -> dict:
     """Scrape a public SAP Community page. No login — navigate, wait out the
     Cloudflare challenge + render, extract the main text.
     Returns { success, raw_text, clean_text, title, error, trace }."""
+    with _BROWSER_LOCK:
+        return _scrape_community_locked(url)
+
+
+def _scrape_community_locked(url: str) -> dict:
     trace = []
 
     def tr(phase, status, message, detail=None):
         trace.append({"at": _ts(), "phase": phase, "status": status,
                       "message": message, "detail": detail})
 
-    nav_ok, _ = _run(["navigate", url], timeout=30)
+    nav_ok, nav_out = _navigate(url, timeout=30)
     tr("navigate", "ok" if nav_ok else "error",
-       f"Opened {url}" if nav_ok else "Navigate command failed")
+       f"Opened {url}" if nav_ok else "Navigate command failed",
+       None if nav_ok else (nav_out[:300] or None))
     if not nav_ok:
         return {"success": False, "error": "navigate_failed", "trace": trace}
 

@@ -5,22 +5,28 @@
 # smoke-tests everything, and prints the public URLs.
 #
 #   Usage on the box (repo already cloned here):
-#     sudo DOMAIN=error-db-driftal.driftal.com bash deploy.sh          # full deploy
-#     sudo bash deploy.sh test                                         # re-run smoke tests
-#     sudo bash deploy.sh status                                       # service status + URLs
+#     sudo bash deploy.sh                 # full deploy (DOMAIN defaults to the sslip.io host)
+#     sudo bash deploy.sh test            # re-run smoke tests
+#     sudo bash deploy.sh status          # service status + URLs
+#
+#   HTTPS host: default is <elastic-ip>.sslip.io — auto-resolves to the box, gets a real
+#   Let's Encrypt cert, no DNS record to manage. Override with DOMAIN=your.domain.com if
+#   you point a real A-record at the elastic IP.
 #
 #   Prereqs you do ONCE in the AWS console (script can't):
-#     1. Elastic IP → associate with the instance (stable IP for DNS).
+#     1. Elastic IP → associate with the instance (must equal the IP baked into DOMAIN below).
 #     2. Security group inbound: 22 (SSH, your IP), 80 + 443 (0.0.0.0/0).
-#     3. DNS → A-record  $DOMAIN  →  <elastic IP>   (in driftal.com's DNS host).
-#     4. DB reach: launch this EC2 in Aurora's VPC; Aurora SG inbound 5432 from THIS EC2's SG.
-#     5. DB auth (IAM): either attach an instance role with rds-db:connect, OR put an
-#        IAM-user's AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY in .env. Keep DB_PASSWORD empty.
+#     3. DB reach: launch this EC2 in Aurora's VPC; Aurora SG inbound 5432 from THIS EC2's SG.
+#     4. DB auth (IAM): attach an instance role with rds-db:connect (or IAM-user keys in .env).
+#        Keep DB_PASSWORD empty for IAM.
+#   Optional .env knobs: SCRAPE_DOWNLOAD_DIR (attachment downloads), OPENCLAW_PROFILE
+#   (isolate openclaw to a box-local browser profile).
 #
 set -euo pipefail
 
 # ===== config (override via env) ============================================
-DOMAIN="${DOMAIN:-error-db-driftal.driftal.com}"
+# sslip.io host for the current elastic IP — real trusted cert, no DNS record needed.
+DOMAIN="${DOMAIN:-16.113.9.182.sslip.io}"
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_USER="${SUDO_USER:-ec2-user}"
 NODE_MAJOR="20"
@@ -225,7 +231,7 @@ smoke() {
   [ "$code" != "000" ] && ok "MCP :$MCP_PORT/mcp responding (HTTP $code)" || warn "MCP not responding (journalctl -u error-dna-mcp)"
   code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$DOMAIN/api/health" || echo 000)
   if [ "$code" = "200" ]; then ok "https://$DOMAIN/api/health → 200 (public + TLS live)"
-  else warn "public https → $code — set DNS A-record ($DOMAIN → $(public_ip)) + open 80/443 in the SG, then: sudo bash deploy.sh test"; fi
+  else warn "public https → $code — confirm $DOMAIN resolves to this box + 80/443 open in the SG (sslip.io needs no DNS record), then: sudo bash deploy.sh test"; fi
 }
 
 print_urls() {
@@ -236,7 +242,7 @@ print_urls() {
   Error DNA — deployed (EC2 / Amazon Linux 2023)
 ────────────────────────────────────────────────────────────
   Public IP        : $ip
-  DNS A-record     : $DOMAIN  →  $ip   (add this in driftal.com DNS)
+  Host             : $DOMAIN  (sslip.io → resolves to this IP, no DNS record needed)
 
   API base         : https://$DOMAIN/api
   Health           : https://$DOMAIN/api/health
