@@ -177,5 +177,10 @@ async def loop():
 
 
 async def start():
+    # Self-heal: a scrape that crashed mid-run leaves its URL stuck in 'scraping'.
+    # Nothing is scraping at boot (one runs at a time), so reset those to pending.
+    healed = await write("UPDATE urls SET status='pending' WHERE status='scraping' RETURNING id")
+    if healed:
+        logger.info(f"↺ reset {len(healed)} stuck 'scraping' URL(s) → pending")
     asyncio.create_task(loop())
     logger.info("🚀 Scheduler started")

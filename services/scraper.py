@@ -64,6 +64,16 @@ def _clear_session() -> None:
     _run(["cookies", "clear"], timeout=15)
 
 
+# Account of the last successful login. When scrape_note is handed a DIFFERENT
+# account (e.g. after /rotate), we clear the persisted session so it logs in fresh
+# as the new account instead of riding the old "keep me signed in" cookie.
+# ponytail: process-global, resets on restart. On restart _last_account=None so the
+# FIRST scrape rides the existing cookie (no clear) — avoids an MFA tax on every
+# reboot, and the persisted session normally matches the DB-active account anyway.
+# Only an in-process switch (old != new) forces the re-login.
+_last_account: str | None = None
+
+
 # ---- page signals ---------------------------------------------------------
 
 # One DOM probe that returns every signal classify() needs, as JSON. openclaw
@@ -449,11 +459,101 @@ def test_login(login_url: str, username: str, password: str) -> dict:
     return {"ok": False, "message": f"Login timed out (last state: {last_state})", "state": last_state}
 
 
+import os as _os
+from config import SCRAPE_DOWNLOAD_DIR as _DOWNLOAD_DIR
+
+# Make sure the download dir exists so openclaw/Chrome + our scan agree on a path.
+try:
+    _os.makedirs(_DOWNLOAD_DIR, exist_ok=True)
+except OSError:
+    pass
+_ATTACH_EXT_RE = r"\\.(xsd|xml|wsdl|pdf|txt|json|log|csv|tsv|docx|xlsx|zip|properties|groovy|sql|yaml|yml)$"
+
+
+def _fetch_attachments() -> tuple[str, list]:
+    """Open the note's Attachments tab, download each file, extract its text.
+
+    Returns (combined_text, [filenames]). Best-effort — any failure yields ("", []).
+    Proven flow: click 'Attachments' tab → click each file cell (triggers a browser
+    download) → read the file off disk → extract text.
+    """
+    from services.attachments import extract_text, SUPPORTED_EXTS, MAX_ATTACH_CHARS
+
+    # 1. reveal the Attachments tab (a leaf node whose text is exactly 'Attachments').
+    _run(["evaluate", "--fn",
+          "()=>{const es=[...document.querySelectorAll('*')].filter(e=>e.offsetParent&&(e.textContent||'').trim()==='Attachments'&&e.children.length<=1);"
+          "if(es.length){es[es.length-1].click();return'ok'}return'no'}"], timeout=15)
+    time.sleep(4)
+
+    # 2. enumerate attachment filenames rendered in the tab.
+    ok, out = _run(["evaluate", "--fn",
+                    "()=>{const s=[...document.querySelectorAll('span,td,a')].filter(e=>e.offsetParent&&/" + _ATTACH_EXT_RE +
+                    "/i.test((e.textContent||'').trim()));"
+                    "return JSON.stringify([...new Set(s.map(e=>(e.textContent||'').trim()))].slice(0,10))}"], timeout=15)
+    try:
+        files = json.loads(out) if out else []
+    except Exception:
+        files = []
+    if not files:
+        return "", []
+
+    before = set(_os.listdir(_DOWNLOAD_DIR)) if _os.path.isdir(_DOWNLOAD_DIR) else set()
+
+    # 3. click each filename cell → downloads to disk.
+    for fname in files:
+        _run(["evaluate", "--fn",
+              "()=>{const e=[...document.querySelectorAll('span,td,a')].find(x=>x.offsetParent&&(x.textContent||'').trim()==" +
+              json.dumps(fname) + ");if(e){e.click();return'ok'}return'no'}"], timeout=15)
+        time.sleep(5)
+
+    # 4. resolve ONLY the files we just downloaded (after - before) — never touch
+    #    the user's pre-existing files. Handles openclaw's "name (1).xsd" dedupe too.
+    after = set(_os.listdir(_DOWNLOAD_DIR)) if _os.path.isdir(_DOWNLOAD_DIR) else set()
+    downloaded = [_os.path.join(_DOWNLOAD_DIR, f) for f in sorted(after - before)]
+
+    # Diagnose a wrong download dir (common after moving to a new host): files were
+    # listed in the tab but nothing landed where we're looking → SCRAPE_DOWNLOAD_DIR
+    # doesn't match the browser's actual download directory.
+    if files and not downloaded:
+        logger.warning(f"  ⚠️ {len(files)} attachment(s) detected but none captured in "
+                       f"{_DOWNLOAD_DIR} — set SCRAPE_DOWNLOAD_DIR to the browser's real download dir")
+
+    # 5. extract text (capped), then DELETE everything we downloaded — zero disk retention.
+    combined, names, total = [], [], 0
+    try:
+        for p in downloaded:
+            if _os.path.splitext(p)[1].lower() not in SUPPORTED_EXTS:
+                continue
+            text = extract_text(p)
+            if not text.strip():
+                continue
+            chunk = text[: max(0, MAX_ATTACH_CHARS - total)]
+            if not chunk:
+                break
+            combined.append(f"--- ATTACHMENT: {_os.path.basename(p)} ---\n{chunk}")
+            names.append(_os.path.basename(p))
+            total += len(chunk)
+        return "\n\n".join(combined), names
+    finally:
+        for p in downloaded:
+            try:
+                _os.remove(p)
+            except OSError:
+                pass
+
+
 def scrape_note(url: str, username: str = None, password: str = None) -> dict:
     """
     Scrape a SAP note. Drives through login/account-select/consent as needed.
-    Returns { success, raw_text, clean_text, title, error }.
+    Also downloads + extracts attachment text (best-effort) and appends it.
+    Returns { success, raw_text, clean_text, title, error, trace, attachments }.
     """
+    global _last_account
+    # Account changed since last login (rotate) → drop old session, force fresh login.
+    switched = bool(username) and username != _last_account
+    if switched and _last_account is not None:
+        _clear_session()
+
     nav_ok, _ = _run(["navigate", url], timeout=30)
     time.sleep(5)
     nav_step = [{"at": _ts(), "phase": "navigate",
@@ -468,6 +568,10 @@ def scrape_note(url: str, username: str = None, password: str = None) -> dict:
         mapped = {"needs_login": "session_expired"}.get(err, err)
         logger.warning(f"  ⚠️ drive failed: {mapped}")
         return {"success": False, "error": mapped, "trace": trace}
+
+    # Passed the login wall as this account — remember it so we only re-login on switch.
+    if username:
+        _last_account = username
 
     if len(text) < 100:
         trace.append({"at": _ts(), "phase": "done", "status": "error",
@@ -513,13 +617,90 @@ def scrape_note(url: str, username: str = None, password: str = None) -> dict:
                   "message": f"Parsed article: {title[:60]}" if title else "Parsed article",
                   "detail": f"{len(clean_text)} chars cleaned"})
 
+    # Best-effort: download + extract attachment text, append for the LLM. Never blocks.
+    attachments = []
+    try:
+        att_text, attachments = _fetch_attachments()
+        if att_text:
+            clean_text = clean_text + "\n\n" + att_text
+            text = text + "\n\n" + att_text
+            trace.append({"at": _ts(), "phase": "attachments", "status": "ok",
+                          "message": f"Attached {len(attachments)} file(s)",
+                          "detail": ", ".join(attachments)})
+        else:
+            trace.append({"at": _ts(), "phase": "attachments", "status": "info",
+                          "message": "No attachments"})
+    except Exception as e:
+        logger.warning(f"  ⚠️ attachment fetch failed: {e}")
+        trace.append({"at": _ts(), "phase": "attachments", "status": "warn",
+                      "message": "Attachment fetch failed — using note text only", "detail": str(e)})
+
     return {
         "success": True,
         "raw_text": text,
         "clean_text": clean_text,
         "title": title,
         "trace": trace,
+        "attachments": attachments,
     }
+
+
+# ---- SAP Community (public, no login) ------------------------------------
+
+# Cloudflare's "just a moment" JS challenge is in _LOADING_KW, so _looks_loading
+# already reports the challenge page as "still loading". A real browser clears it
+# on its own within a few seconds; we just keep re-probing until it does.
+COMMUNITY_LOADING_WAITS = 10
+
+
+def scrape_community(url: str) -> dict:
+    """Scrape a public SAP Community page. No login — navigate, wait out the
+    Cloudflare challenge + render, extract the main text.
+    Returns { success, raw_text, clean_text, title, error, trace }."""
+    trace = []
+
+    def tr(phase, status, message, detail=None):
+        trace.append({"at": _ts(), "phase": phase, "status": status,
+                      "message": message, "detail": detail})
+
+    nav_ok, _ = _run(["navigate", url], timeout=30)
+    tr("navigate", "ok" if nav_ok else "error",
+       f"Opened {url}" if nav_ok else "Navigate command failed")
+    if not nav_ok:
+        return {"success": False, "error": "navigate_failed", "trace": trace}
+
+    # Poll until the challenge clears and real content renders (or we give up).
+    sig = _probe()
+    waits = 0
+    while (sig is None or _looks_loading(sig)) and waits < COMMUNITY_LOADING_WAITS:
+        time.sleep(STEP_COOLDOWN)
+        sig = _probe()
+        waits += 1
+    cleared = sig is not None and not _looks_loading(sig)
+    tr("render", "ok" if cleared else "warn",
+       "Page rendered" if cleared else f"Still loading after {waits} waits",
+       None if cleared else "Cloudflare challenge may not have cleared")
+
+    ok, text = _get_text()
+    text = text or ""
+    if not ok or len(text) < 100:
+        tr("done", "error", "Extracted text too short", f"{len(text)} chars")
+        return {"success": False, "error": "too_short", "raw_text": text, "trace": trace}
+
+    # Title: page heading if we have one, else the first non-trivial line.
+    title = (sig or {}).get("heading") or ""
+    if not title:
+        for line in text.split("\n"):
+            if len(line.strip()) > 8:
+                title = line.strip()[:120]
+                break
+
+    # No section parsing — community threads aren't structured like KBAs. The
+    # summarizer prompt already strips nav/chrome, so hand it the full text.
+    tr("parse", "ok", f"Extracted {len(text)} chars",
+       title[:60] if title else None)
+    return {"success": True, "raw_text": text, "clean_text": text,
+            "title": title, "trace": trace}
 
 
 if __name__ == "__main__":

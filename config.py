@@ -23,6 +23,10 @@ AUTH_TOKEN_TTL = int(os.getenv("AUTH_TOKEN_TTL", str(7 * 24 * 3600)))
 # Reversible encryption for stored SAP account passwords (Fernet key derived from this).
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")
 
+# Where openclaw/headless-Chrome drops attachment downloads (env-specific). We read
+# the extracted text from here then delete the files. Override per host in .env.
+SCRAPE_DOWNLOAD_DIR = os.getenv("SCRAPE_DOWNLOAD_DIR", os.path.expanduser("~/Downloads"))
+
 # LLM API
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_API_URL = os.getenv("LLM_API_URL", "https://api.deepseek.com/v1/chat/completions")

@@ -159,6 +159,62 @@ CREATE TABLE IF NOT EXISTS scrape_log (
     error_message TEXT,
     created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
 );
+
+-- ---- SAP Community: same shape as the notes tables, own rows. No auth, no
+-- ---- scheduler — public pages scraped one-by-one via the browser (Cloudflare).
+CREATE TABLE IF NOT EXISTS community_urls (
+    id SERIAL PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    title TEXT,
+    source_url TEXT NOT NULL,
+    component TEXT,
+    category TEXT,
+    priority TEXT,
+    released_on TEXT,
+    status TEXT DEFAULT 'pending',
+    scraped_at TEXT,
+    error_message TEXT,
+    created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS'),
+    updated_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
+);
+
+CREATE TABLE IF NOT EXISTS community_summaries (
+    id SERIAL PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    url_id INTEGER REFERENCES community_urls(id),
+    title TEXT NOT NULL,
+    family TEXT,
+    area TEXT,
+    type TEXT,
+    issue TEXT,
+    summary TEXT,
+    steps TEXT,
+    gotchas TEXT,
+    tags TEXT,
+    source_version INTEGER,
+    source_date TEXT,
+    source_url TEXT,
+    component TEXT,
+    environment TEXT DEFAULT '[]',
+    see_also TEXT DEFAULT '[]',
+    is_latest INTEGER DEFAULT 1,
+    superseded_by_id INTEGER,
+    verification_status TEXT DEFAULT 'current',
+    created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS'),
+    updated_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
+);
+
+CREATE TABLE IF NOT EXISTS community_scrape_log (
+    id SERIAL PRIMARY KEY,
+    url_id INTEGER,
+    source_id TEXT,
+    status TEXT,
+    action TEXT,
+    duration_ms INTEGER,
+    error_message TEXT,
+    trace TEXT,
+    created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
+);
 """
 
 FAMILIES_SEED = """

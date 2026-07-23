@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "edna-fe", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev"], "port": 8080, "cwd": "/Users/Lokesh/Desktop/error-dna-backend/error-knowledge-base" }
+  ]
+}

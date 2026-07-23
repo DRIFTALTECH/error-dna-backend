@@ -14,6 +14,7 @@ from routes.summaries import router as summaries_router
 from routes.credentials import router as credentials_router
 from routes.scheduler import router as scheduler_router
 from routes.compat import router as compat_router
+from routes.community import router as community_router
 
 
 @asynccontextmanager
@@ -61,6 +62,7 @@ app.include_router(summaries_router, dependencies=_auth)
 app.include_router(credentials_router, dependencies=_auth)
 app.include_router(scheduler_router, dependencies=_auth)
 app.include_router(compat_router, dependencies=_auth)  # /api/families — frontend-shaped adapter
+app.include_router(community_router, dependencies=_auth)  # /api/community/* — SAP Community
 
 
 if __name__ == "__main__":
