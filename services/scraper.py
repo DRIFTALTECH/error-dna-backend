@@ -44,9 +44,18 @@ def _looks_loading(sig: dict) -> bool:
             and not sig.get("acctTiles"))
 
 
+import os as _os_run
+
+# OPENCLAW_PROFILE isolates openclaw to a machine-local profile/gateway/browser so
+# the box drives its OWN headless Chrome instead of routing to the account's other
+# node (e.g. the laptop). Empty = default profile.
+_OPENCLAW_PROFILE = _os_run.getenv("OPENCLAW_PROFILE", "").strip()
+_OPENCLAW_BASE = (["openclaw", "--profile", _OPENCLAW_PROFILE] if _OPENCLAW_PROFILE else ["openclaw"])
+
+
 def _run(cmd: list, timeout: int = 30) -> tuple[bool, str]:
     try:
-        r = subprocess.run(["openclaw", "browser"] + cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(_OPENCLAW_BASE + ["browser"] + cmd, capture_output=True, text=True, timeout=timeout)
         time.sleep(STEP_COOLDOWN)
         return r.returncode == 0, r.stdout.strip() or r.stderr.strip()
     except Exception as e:
