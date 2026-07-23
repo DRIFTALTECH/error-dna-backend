@@ -3,8 +3,10 @@
 import json
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Query
+from config import ACCOUNT_ROTATE_HOURS
 from db import read, write
 from models import SchedulerUpdate
+from services.scheduler import seconds_until_account_rotate
 
 router = APIRouter(prefix="/api/scheduler", tags=["scheduler"])
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -30,6 +32,7 @@ async def scheduler_status():
     ))[0]
 
     total_pending = (await read("SELECT COUNT(*) as c FROM urls WHERE status='pending'"))[0]["c"]
+    n_creds = (await read("SELECT COUNT(*) as c FROM credentials"))[0]["c"]
     active_label = await _active_account_label()
 
     remaining = 0
@@ -40,11 +43,18 @@ async def scheduler_status():
         except Exception:
             pass
 
+    rotate_secs = seconds_until_account_rotate(config.get("account_activated_at"))
+    # Auto-rotate only applies when there are ≥2 accounts.
+    if n_creds < 2:
+        rotate_secs = None
+
     is_paused = bool(config.get("is_paused", 1))
     return {
         "active_account": active_label or "—",
         "running": not is_paused,
         "next_scrape_seconds": remaining,
+        "account_rotate_hours": ACCOUNT_ROTATE_HOURS,
+        "next_account_rotate_seconds": rotate_secs,
         "today": {
             "scraped": today_stats.get("scraped") or 0,
             "failed": today_stats.get("failed") or 0,

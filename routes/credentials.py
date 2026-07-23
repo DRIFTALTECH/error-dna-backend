@@ -115,6 +115,9 @@ async def delete_credential(cred_id: int):
 async def activate(cred_id: int):
     await write("UPDATE credentials SET is_active=0")
     await write("UPDATE credentials SET is_active=1 WHERE id=?", (cred_id,))
+    # Reset the auto-rotate clock so this account gets a full ACCOUNT_ROTATE_HOURS window.
+    from services.scheduler import stamp_account_activated
+    await stamp_account_activated()
     return {"ok": True}
 
 

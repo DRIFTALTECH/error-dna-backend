@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS scheduler_config (
     max_delay_min INTEGER DEFAULT 60,
     is_paused INTEGER DEFAULT 0,
     next_scrape_at TEXT,
+    account_activated_at TEXT,
     updated_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
 );
 
@@ -251,6 +252,10 @@ async def init_db():
         await conn.execute(SCHEMA)
         # Added after scrape_log shipped — store the full per-run step trace as JSON.
         await conn.execute("ALTER TABLE scrape_log ADD COLUMN IF NOT EXISTS trace TEXT;")
+        # Clock for 24h (configurable) auto account rotate.
+        await conn.execute(
+            "ALTER TABLE scheduler_config ADD COLUMN IF NOT EXISTS account_activated_at TEXT;"
+        )
         await conn.execute(FAMILIES_SEED)
         await conn.execute(SCHEDULER_SEED)
         await conn.execute(FIX_SEQUENCES)

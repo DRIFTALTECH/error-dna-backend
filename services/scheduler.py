@@ -3,6 +3,7 @@
 import asyncio, random, time, json as _json, logging
 from datetime import datetime, timezone, timedelta
 
+from config import ACCOUNT_ROTATE_HOURS
 from db import read, write
 from services.scraper import scrape_note
 from services.summarizer import summarize
@@ -15,16 +16,77 @@ def log(msg: str):
     print(f"  {msg}", flush=True)
 
 
+async def stamp_account_activated():
+    """Mark 'now' as when the current active credential became active."""
+    await write(
+        "UPDATE scheduler_config SET account_activated_at=? WHERE id=1",
+        (datetime.now(IST).isoformat(),),
+    )
+
+
 async def rotate_account():
     """Activate the next credential after the current active one (wraps)."""
-    rows = await read("SELECT id, is_active FROM credentials ORDER BY id")
+    rows = await read("SELECT id, is_active, label FROM credentials ORDER BY id")
     if not rows:
-        return
+        return None
+    if len(rows) < 2:
+        await stamp_account_activated()
+        return rows[0].get("label")
     ids = [r["id"] for r in rows]
     active = next((r["id"] for r in rows if r["is_active"]), ids[0])
     nxt = ids[(ids.index(active) + 1) % len(ids)]
+    nxt_label = next(r["label"] for r in rows if r["id"] == nxt)
     await write("UPDATE credentials SET is_active=0")
     await write("UPDATE credentials SET is_active=1 WHERE id=?", (nxt,))
+    await stamp_account_activated()
+    log(f"🔄 Rotated account → {nxt_label}")
+    return nxt_label
+
+
+async def maybe_auto_rotate() -> bool:
+    """If active account older than ACCOUNT_ROTATE_HOURS and ≥2 creds, rotate once.
+
+    Returns True when a rotation happened. ACCOUNT_ROTATE_HOURS≤0 disables.
+    """
+    if ACCOUNT_ROTATE_HOURS <= 0:
+        return False
+    n = (await read("SELECT COUNT(*) AS c FROM credentials"))[0]["c"]
+    if n < 2:
+        return False
+
+    cfg = (await read("SELECT account_activated_at FROM scheduler_config WHERE id=1"))[0]
+    raw = cfg.get("account_activated_at")
+    now = datetime.now(IST)
+    if not raw:
+        # First observation — start the clock; don't rotate immediately on deploy.
+        await stamp_account_activated()
+        return False
+    try:
+        started = datetime.fromisoformat(raw)
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=IST)
+    except Exception:
+        await stamp_account_activated()
+        return False
+
+    if now - started < timedelta(hours=ACCOUNT_ROTATE_HOURS):
+        return False
+    await rotate_account()
+    return True
+
+
+def seconds_until_account_rotate(activated_at: str | None) -> int | None:
+    """Seconds until next auto-rotate, or None if disabled / unknown."""
+    if ACCOUNT_ROTATE_HOURS <= 0 or not activated_at:
+        return None
+    try:
+        started = datetime.fromisoformat(activated_at)
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=IST)
+    except Exception:
+        return None
+    due = started + timedelta(hours=ACCOUNT_ROTATE_HOURS)
+    return max(0, int((due - datetime.now(IST)).total_seconds()))
 
 
 def _now_hms():
@@ -152,6 +214,9 @@ async def one_scrape():
 async def loop():
     while True:
         try:
+            # Hard-reset: swap to the next SAP account every ACCOUNT_ROTATE_HOURS.
+            await maybe_auto_rotate()
+
             cfg = (await read("SELECT is_paused, min_delay_min, max_delay_min, next_scrape_at FROM scheduler_config WHERE id=1"))[0]
             paused, min_d, max_d, next_at = cfg["is_paused"], cfg["min_delay_min"], cfg["max_delay_min"], cfg["next_scrape_at"]
 
@@ -182,5 +247,10 @@ async def start():
     healed = await write("UPDATE urls SET status='pending' WHERE status='scraping' RETURNING id")
     if healed:
         logger.info(f"↺ reset {len(healed)} stuck 'scraping' URL(s) → pending")
+    # Start the account-rotate clock if never stamped (won't rotate until N hours later).
+    cfg = await read("SELECT account_activated_at FROM scheduler_config WHERE id=1")
+    if cfg and not cfg[0].get("account_activated_at"):
+        await stamp_account_activated()
+        logger.info(f"⏱ account rotate clock started ({ACCOUNT_ROTATE_HOURS}h)")
     asyncio.create_task(loop())
     logger.info("🚀 Scheduler started")

@@ -39,6 +39,8 @@ HOST = os.getenv("HOST", "0.0.0.0")
 # Scheduler defaults
 MIN_DELAY_MIN = int(os.getenv("MIN_DELAY_MIN", "5"))
 MAX_DELAY_MIN = int(os.getenv("MAX_DELAY_MIN", "60"))
+# Auto-rotate active SAP credential after N hours (0 = disabled). Needs ≥2 credentials.
+ACCOUNT_ROTATE_HOURS = int(os.getenv("ACCOUNT_ROTATE_HOURS", "24"))
 
 # OpenClaw
 OPENCLAW_BROWSER_TIMEOUT = int(os.getenv("OPENCLAW_BROWSER_TIMEOUT", "30"))
