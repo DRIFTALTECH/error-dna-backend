@@ -200,14 +200,15 @@ async def one_scrape():
         )
         summary_id = inserted[0]["id"]
         await write("UPDATE urls SET status='completed', scraped_at=? WHERE id=?", (now, url["id"]))
-        # Vector chunk — best-effort; summary row already persisted.
+        rt("store", "ok", "Summary stored in knowledge base", "action: create")
+        # Vector chunk — best-effort; recorded in the same scrape_log trace.
         from services.embeddings import embed_summary_safe
-        await embed_summary_safe("notes", summary_id, url["source_id"], {
+        emb = await embed_summary_safe("notes", summary_id, url["source_id"], {
             "title": s(summary.get("title")), "family": s(summary.get("family")),
             "issue": s(summary.get("issue")), "summary": s(summary.get("summary")),
             "tags": s(summary.get("tags")), "gotchas": s(summary.get("gotchas")),
         })
-        rt("store", "ok", "Summary stored in knowledge base", "action: create")
+        rt("embed", "ok" if emb["ok"] else "error", emb["message"], emb.get("detail"))
         rt("done", "ok", "Run completed successfully")
         await write(
             "INSERT INTO scrape_log(url_id,source_id,status,action,duration_ms,trace) VALUES(?,?,?,?,?,?)",

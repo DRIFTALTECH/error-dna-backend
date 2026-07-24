@@ -116,10 +116,27 @@ async def upsert_embedding(
     return "updated" if existing else "created"
 
 
-async def embed_summary_safe(source: str, summary_id: int, source_id: str, row: dict) -> None:
-    """Best-effort wrapper — never raises to the scrape pipeline."""
+async def embed_summary_safe(source: str, summary_id: int, source_id: str, row: dict) -> dict:
+    """Best-effort wrapper — never raises. Returns {ok, action, message, detail} for audit traces."""
     try:
         action = await upsert_embedding(source, summary_id, source_id, row)
         logger.info(f"embed {source}#{source_id} (id={summary_id}): {action}")
+        msgs = {
+            "created": "Embedding saved to vector store",
+            "updated": "Embedding updated in vector store",
+            "skipped": "Embedding unchanged — skipped",
+        }
+        return {
+            "ok": True,
+            "action": action,
+            "message": msgs.get(action, f"Embedding {action}"),
+            "detail": f"model={EMBED_MODEL_ID} dims={EMBED_DIMENSIONS} summary_id={summary_id}",
+        }
     except Exception as e:
         logger.warning(f"embed {source}#{source_id} failed: {e}")
+        return {
+            "ok": False,
+            "action": "failed",
+            "message": "Embedding not saved",
+            "detail": str(e)[:300],
+        }

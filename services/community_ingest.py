@@ -138,14 +138,19 @@ async def _process_one(url: dict) -> None:
     )
     summary_id = inserted[0]["id"]
     await write("UPDATE community_urls SET status='completed', scraped_at=? WHERE id=?", (now, url["id"]))
-    # Vector chunk — best-effort; summary row already persisted.
+    trace.append({"at": datetime.now(IST).strftime("%H:%M:%S"), "phase": "store",
+                  "status": "ok", "message": "Stored in community knowledge base"})
+    # Vector chunk — best-effort; recorded in the same community_scrape_log trace.
     from services.embeddings import embed_summary_safe
-    await embed_summary_safe("community", summary_id, url["source_id"], {
+    emb = await embed_summary_safe("community", summary_id, url["source_id"], {
         "title": title, "family": family, "issue": issue,
         "summary": body, "tags": tags, "gotchas": gotchas,
     })
+    trace.append({"at": datetime.now(IST).strftime("%H:%M:%S"), "phase": "embed",
+                  "status": "ok" if emb["ok"] else "error",
+                  "message": emb["message"], "detail": emb.get("detail")})
     trace.append({"at": datetime.now(IST).strftime("%H:%M:%S"), "phase": "done",
-                  "status": "ok", "message": "Stored in community knowledge base"})
+                  "status": "ok", "message": "Run completed successfully"})
     await log_row("success", "create")
     logger.info(f"community #{url['source_id']} saved: {summary.get('title','')[:60]}")
 
