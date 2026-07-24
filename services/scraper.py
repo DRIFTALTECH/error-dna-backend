@@ -707,13 +707,18 @@ def _scrape_note_locked(url: str, username: str = None, password: str = None) ->
 COMMUNITY_LOADING_WAITS = 10
 
 
-MAX_COMMUNITY_IMAGES = 6
+# Keep image capture tiny on EC2: base64 travels Chrome → openclaw stdout → Python.
+# 6×4MB data-URLs previously blew small instances (OOM → whole box dies).
+MAX_COMMUNITY_IMAGES = 3
+MAX_COMMUNITY_IMAGE_BYTES = 400_000  # ~400 KB each
+MAX_COMMUNITY_TEXT_CHARS = 40_000    # trim before returning to ingest/LLM
 
 # In-page: collect content images (skip avatars/icons/emoji), each with its ALT,
 # the nearby text (context for placement), and the bytes as a data URL — fetched
 # in-page so the browser's Cloudflare cookie is used (the CDN is gated too).
 _IMAGES_FN = r"""async ()=>{
   const clean = s => (s||'').replace(/\s+/g,' ').trim();
+  const maxBytes = %MAX_BYTES%;
   const imgs = [...document.querySelectorAll('img')].filter(i =>
     i.offsetParent && i.naturalWidth > 80 && i.naturalHeight > 80 &&
     !/avatar|emoji|icon|rank|badge|sprite|logo|smiley/i.test((i.src||'')+(i.className||'')));
@@ -727,11 +732,11 @@ _IMAGES_FN = r"""async ()=>{
     if (!ctx) { let n = i.parentElement; for (let k=0;k<4&&n;k++){ const t=clean(n.textContent); if (t.length>15){ctx=t;break;} n=n.parentElement; } }
     let dataUrl = '';
     try { const r = await fetch(src); const b = await r.blob();
-      if (b.size < 4_000_000) dataUrl = await new Promise(res=>{const fr=new FileReader();fr.onload=()=>res(fr.result);fr.onerror=()=>res('');fr.readAsDataURL(b);}); } catch(e){}
+      if (b.size > 0 && b.size < maxBytes) dataUrl = await new Promise(res=>{const fr=new FileReader();fr.onload=()=>res(fr.result);fr.onerror=()=>res('');fr.readAsDataURL(b);}); } catch(e){}
     out.push({ src, alt: clean(i.alt).slice(0,120), context: ctx.slice(0,400), dataUrl });
   }
   return JSON.stringify(out);
-}""".replace("%MAX%", str(MAX_COMMUNITY_IMAGES))
+}""".replace("%MAX%", str(MAX_COMMUNITY_IMAGES)).replace("%MAX_BYTES%", str(MAX_COMMUNITY_IMAGE_BYTES))
 
 
 def _decode_json(out: str):
@@ -800,6 +805,7 @@ def _scrape_community_locked(url: str) -> dict:
        f"Opened {url}" if nav_ok else "Navigate command failed",
        None if nav_ok else (nav_out[:300] or None))
     if not nav_ok:
+        _release_browser_page()
         return {"success": False, "error": "navigate_failed", "trace": trace}
 
     # Poll until the challenge clears and real content renders (or we give up).
@@ -818,7 +824,8 @@ def _scrape_community_locked(url: str) -> dict:
     text = text or ""
     if not ok or len(text) < 100:
         tr("done", "error", "Extracted text too short", f"{len(text)} chars")
-        return {"success": False, "error": "too_short", "raw_text": text, "trace": trace}
+        _release_browser_page()
+        return {"success": False, "error": "too_short", "raw_text": text[:500], "trace": trace}
 
     # Title: page heading if we have one, else the first non-trivial line.
     title = (sig or {}).get("heading") or ""
@@ -828,10 +835,14 @@ def _scrape_community_locked(url: str) -> dict:
                 title = line.strip()[:120]
                 break
 
-    # No section parsing — community threads aren't structured like KBAs. The
-    # summarizer prompt already strips nav/chrome, so hand it the full text.
-    tr("parse", "ok", f"Extracted {len(text)} chars",
-       title[:60] if title else None)
+    # Cap text — community SPA dumps are huge; LLM only needs the article body.
+    if len(text) > MAX_COMMUNITY_TEXT_CHARS:
+        tr("parse", "warn", f"Truncated text {len(text)} → {MAX_COMMUNITY_TEXT_CHARS} chars",
+           title[:60] if title else None)
+        text = text[:MAX_COMMUNITY_TEXT_CHARS]
+    else:
+        tr("parse", "ok", f"Extracted {len(text)} chars",
+           title[:60] if title else None)
 
     # Content images + their placement context (best-effort; never blocks).
     images = []
@@ -845,8 +856,19 @@ def _scrape_community_locked(url: str) -> dict:
     except Exception as e:
         tr("images", "warn", "Image capture failed — text only", str(e))
 
+    # Drop the heavy SPA from Chrome RAM before the next URL.
+    _release_browser_page()
+
     return {"success": True, "raw_text": text, "clean_text": text,
             "title": title, "images": images, "trace": trace}
+
+
+def _release_browser_page() -> None:
+    """Navigate away so Chromium can GC the previous community SPA + image blobs."""
+    try:
+        _run(["navigate", "about:blank"], timeout=15)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

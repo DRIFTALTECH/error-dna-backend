@@ -1,13 +1,18 @@
 """SAP Community ingest — drain pending community_urls one by one.
 
-No auth, no scheduler, no delays (unlike the SAP-notes scraper): just take the
-next pending row, scrape it via the browser, summarize, save, repeat until empty.
-One drain runs at a time; kicking it again while it runs is a no-op.
+No auth, no scheduler. Take next pending row → scrape → summarize → save →
+1 min pause → next, until the queue is empty. One drain at a time; kicking
+again while running is a no-op.
+
+Unlike SAP Notes, community pages are heavy SPAs (Cloudflare + many images).
+The inter-URL delay lets Chrome/openclaw reclaim RAM on small EC2 boxes.
 """
 
 import asyncio
+import gc
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -17,6 +22,10 @@ from services.summarizer import summarize
 
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
+
+# Pause between URLs so Chrome/openclaw can reclaim RAM (notes scraper has delays;
+# community previously had none → sustained memory climb → OOM kill).
+INTER_ITEM_SLEEP_SEC = float(os.getenv("COMMUNITY_INTER_ITEM_SLEEP_SEC", "60"))
 
 # ponytail: single global flag — one drain at a time is exactly what we want
 # (the browser can only be one place at once). Add a queue only if that changes.
@@ -66,34 +75,49 @@ async def _process_one(url: dict) -> None:
         await write("UPDATE community_urls SET status='failed', error_message=? WHERE id=?", (err, url["id"]))
         await log_row("failed", "scrape", err)
         logger.warning(f"community #{url['source_id']} scrape failed: {err}")
+        result.clear()
         return
 
     # Persist scraped images (S3 or local), keep briefs for the summarizer +
     # a manifest {ref: {key, alt}} for the frontend to render.
+    # Drop data_b64 immediately after save — holding 3× base64 blobs across LLM
+    # round-trips was a major EC2 RAM spike during continuous drain.
     from services.image_store import save as _img_save
     briefs, manifest = [], {}
     for im in (result.get("images") or []):
+        b64 = im.pop("data_b64", None) or ""
+        if not b64:
+            continue
         try:
-            key = await asyncio.to_thread(_img_save, __import__("base64").b64decode(im["data_b64"]), im.get("ext", "png"))
+            key = await asyncio.to_thread(_img_save, __import__("base64").b64decode(b64), im.get("ext", "png"))
         except Exception as e:
             logger.warning(f"community image save failed: {e}")
             continue
+        finally:
+            del b64
         briefs.append({"ref": im["ref"], "context": im.get("context", ""), "alt": im.get("alt", "")})
         manifest[im["ref"]] = {"key": key, "alt": im.get("alt", "")}
+    result["images"] = []  # free any leftover image dicts
     if manifest:
         trace.append({"at": datetime.now(IST).strftime("%H:%M:%S"), "phase": "images",
                       "status": "ok", "message": f"Saved {len(manifest)} image(s)", "detail": ", ".join(manifest)})
 
+    page_text = result.get("clean_text") or result.get("raw_text") or ""
+    result.pop("clean_text", None)
+    result.pop("raw_text", None)
+
     try:
-        summary = await summarize(result.get("clean_text") or result.get("raw_text") or "",
-                                  images=briefs, allow_skip=True)
+        summary = await summarize(page_text, images=briefs, allow_skip=True)
     except Exception as e:
         trace.append({"at": datetime.now(IST).strftime("%H:%M:%S"), "phase": "summarize",
                       "status": "error", "message": "LLM summarization failed", "detail": str(e)})
         await write("UPDATE community_urls SET status='failed', error_message=? WHERE id=?", (f"LLM:{e}", url["id"]))
         await log_row("failed", "summarize", f"LLM:{e}")
         logger.warning(f"community #{url['source_id']} LLM failed: {e}")
+        page_text = ""
         return
+
+    page_text = ""  # free before DB work
 
     # Blog / non-solution → skip: don't store as knowledge, record the reason, drop images.
     if summary.get("is_solution") is False:
@@ -155,20 +179,57 @@ async def _process_one(url: dict) -> None:
     logger.info(f"community #{url['source_id']} saved: {summary.get('title','')[:60]}")
 
 
+async def _next_pending() -> dict | None:
+    """Fetch exactly one pending row. Never prefetch a queue into memory."""
+    rows = await read(
+        "SELECT id, source_id, source_url, title, released_on, component "
+        "FROM community_urls WHERE status='pending' ORDER BY id ASC LIMIT 1"
+    )
+    return rows[0] if rows else None
+
+
 async def _drain() -> None:
+    """Process pending URLs strictly one-at-a-time:
+
+    load 1 → scrape/summarize/save → free it → sleep → load next 1 → …
+    Never loads the full pending list into memory.
+    """
     global _running, _current
+    processed = 0
     try:
         while True:
-            rows = await read("SELECT * FROM community_urls WHERE status='pending' ORDER BY id ASC LIMIT 1")
-            if not rows:
+            url = await _next_pending()
+            if not url:
                 break
-            await _process_one(rows[0])
+            logger.info(
+                f"community drain: loading 1 URL #{url['source_id']} "
+                f"(processed so far: {processed})"
+            )
+            await _process_one(url)
+            url.clear()
+            del url
+            processed += 1
+            _current = None
+            gc.collect()
+
+            # Count peek only — never pull the next row until after the sleep.
+            more = await read(
+                "SELECT 1 AS ok FROM community_urls WHERE status='pending' LIMIT 1"
+            )
+            if not more:
+                break
+            if INTER_ITEM_SLEEP_SEC > 0:
+                logger.info(
+                    f"community drain: {processed} done — sleeping "
+                    f"{INTER_ITEM_SLEEP_SEC:.0f}s before loading next URL"
+                )
+                await asyncio.sleep(INTER_ITEM_SLEEP_SEC)
     except Exception:
         logger.exception("community drain crashed")
     finally:
         _running = False
         _current = None
-        logger.info("community drain finished")
+        logger.info(f"community drain finished ({processed} processed)")
 
 
 def start_drain() -> bool:

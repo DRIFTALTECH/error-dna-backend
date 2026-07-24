@@ -67,6 +67,8 @@ app.include_router(credentials_router, dependencies=_auth)
 app.include_router(scheduler_router, dependencies=_auth)
 app.include_router(compat_router, dependencies=_auth)  # /api/families — frontend-shaped adapter
 app.include_router(community_router, dependencies=_auth)  # /api/community/* — SAP Community
+from routes.developer import router as developer_router
+app.include_router(developer_router, dependencies=_auth)  # /api/developer/* — MCP bearer + URL
 
 
 if __name__ == "__main__":

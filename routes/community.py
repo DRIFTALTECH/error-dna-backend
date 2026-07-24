@@ -58,7 +58,7 @@ async def _insert_url(source_url: str, existing: set, title=None, source_id=None
 @router.get("/urls")
 async def list_urls(
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
+    page_size: int = Query(20, ge=1, le=200),
     status: str = Query(None),
     search: str = Query(None),
 ):
@@ -135,7 +135,8 @@ async def delete_url(url_id: int):
 
 @router.post("/ingest")
 async def ingest():
-    """Kick a background drain of all pending community URLs (one by one)."""
+    """Kick a background drain. Loads and processes exactly one pending URL at a
+    time (never the full queue); continues until pending is empty."""
     pending = (await read("SELECT COUNT(*) as c FROM community_urls WHERE status='pending'"))[0]["c"]
     started = community_ingest.start_drain()
     return {"started": started, "already_running": not started, "pending": pending}
@@ -154,9 +155,17 @@ async def ingest_status():
 
 
 @router.get("/logs")
-async def logs(limit: int = Query(50, ge=1, le=200)):
+async def logs(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
     import json
-    rows = await read("SELECT * FROM community_scrape_log ORDER BY id DESC LIMIT ?", (limit,))
+    offset = (page - 1) * page_size
+    total = (await read("SELECT COUNT(*) as c FROM community_scrape_log"))[0]["c"]
+    rows = await read(
+        "SELECT * FROM community_scrape_log ORDER BY id DESC LIMIT ? OFFSET ?",
+        (page_size, offset),
+    )
     out = []
     for r in rows:
         try:
@@ -168,7 +177,13 @@ async def logs(limit: int = Query(50, ge=1, le=200)):
             "action": r.get("action"), "duration_ms": r.get("duration_ms"),
             "error": r.get("error_message"), "timestamp": r.get("created_at"), "trace": trace,
         })
-    return {"items": out}
+    return {
+        "items": out,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(1, (total + page_size - 1) // page_size),
+    }
 
 
 # ---- Summaries ------------------------------------------------------------

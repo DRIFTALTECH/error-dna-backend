@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS scrape_log (
     new_version INTEGER,
     duration_ms INTEGER,
     error_message TEXT,
+    account_label TEXT,
     created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
 );
 
@@ -232,6 +233,13 @@ CREATE TABLE IF NOT EXISTS summary_embeddings (
     updated_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS'),
     UNIQUE (source, summary_id)
 );
+
+-- Key/value app settings (MCP bearer, public MCP URL, etc.).
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
+);
 """
 
 FAMILIES_SEED = """
@@ -270,6 +278,8 @@ async def init_db():
         await conn.execute(SCHEMA)
         # Added after scrape_log shipped — store the full per-run step trace as JSON.
         await conn.execute("ALTER TABLE scrape_log ADD COLUMN IF NOT EXISTS trace TEXT;")
+        # Which SAP credential ran this scrape (not the current active account).
+        await conn.execute("ALTER TABLE scrape_log ADD COLUMN IF NOT EXISTS account_label TEXT;")
         # Community images manifest: {"image_1": {"key":..., "alt":...}, ...}
         await conn.execute("ALTER TABLE community_summaries ADD COLUMN IF NOT EXISTS images TEXT;")
         # Note attachments: [{"name":..., "key":"doc/…", "ext":...}, ...]

@@ -227,8 +227,11 @@ smoke() {
   sleep 2
   code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$API_PORT/api/health" || echo 000)
   [ "$code" = "200" ] && ok "API /api/health → 200 (local)" || warn "API health local → $code (journalctl -u error-dna-api)"
+  # MCP must reject unauthenticated calls (bearer required).
   code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$MCP_PORT/mcp" || echo 000)
-  [ "$code" != "000" ] && ok "MCP :$MCP_PORT/mcp responding (HTTP $code)" || warn "MCP not responding (journalctl -u error-dna-mcp)"
+  if [ "$code" = "401" ]; then ok "MCP :$MCP_PORT/mcp → 401 without bearer (auth enforced)"
+  elif [ "$code" != "000" ]; then warn "MCP :$MCP_PORT/mcp → $code (expected 401 without bearer)"
+  else warn "MCP not responding (journalctl -u error-dna-mcp)"; fi
   code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$DOMAIN/api/health" || echo 000)
   if [ "$code" = "200" ]; then ok "https://$DOMAIN/api/health → 200 (public + TLS live)"
   else warn "public https → $code — confirm $DOMAIN resolves to this box + 80/443 open in the SG (sslip.io needs no DNS record), then: sudo bash deploy.sh test"; fi
@@ -246,7 +249,8 @@ print_urls() {
 
   API base         : https://$DOMAIN/api
   Health           : https://$DOMAIN/api/health
-  MCP endpoint     : https://$DOMAIN/mcp   (streamable-http)
+  MCP endpoint     : https://$DOMAIN/mcp   (streamable-http, Bearer required)
+  MCP settings     : Developer page in the UI → generate/save bearer
 
   Local (on box)   : http://127.0.0.1:$API_PORT/api   |   http://127.0.0.1:$MCP_PORT/mcp
 

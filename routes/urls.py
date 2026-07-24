@@ -34,7 +34,7 @@ def _parse_xlsx_rows(content: bytes) -> list[dict]:
 @router.get("")
 async def list_urls(
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
+    page_size: int = Query(20, ge=1, le=200),
     status: str = Query(None),
     category: str = Query(None),
     search: str = Query(None),

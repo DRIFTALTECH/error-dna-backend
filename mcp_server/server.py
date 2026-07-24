@@ -4,18 +4,20 @@ Exposes curated SAP-error fixes over MCP. Tools live under mcp_server/tools/*/
 (each with tool.py, handler.py, reference.md). This file wires FastMCP, resources,
 and prompts, then registers all tools.
 
-Run:  python3 -m mcp_server           # streamable-http on :3333/mcp
-Test: python3 -m mcp_server selftest
+Security: streamable-http is gated by McpBearerMiddleware. No bearer configured
+in Developer Settings → 401 on every call. Valid Authorization: Bearer required.
 
-# ponytail: read-only + open (no auth). Add bearer-token ASGI middleware +
-# MCP_TOKEN in .env when this leaves localhost.
+Run:  python3 -m mcp_server           # streamable-http on :3333/mcp
+Test: python3 -m mcp_server selftest  # handlers only (no HTTP auth)
 """
 
 import os
 import sys
 
+import uvicorn
 from mcp.server.fastmcp import FastMCP
 
+from mcp_server.bearer import McpBearerMiddleware
 from mcp_server.tools import register_all
 from mcp_server.tools.get_error.handler import format_fix, handle as get_error_handle
 
@@ -38,6 +40,9 @@ Typical flow:
 Rules: always cite the note_number when you give a fix. If hybrid_search returns no
 hits, say so plainly — do NOT invent SAP notes or fixes. This server is read-only;
 you cannot create, edit, or delete knowledge-base entries.
+
+Auth: every HTTP request must include Authorization: Bearer <token> from Error DNA
+Developer Settings. Calls without a valid bearer are rejected.
 """
 
 mcp = FastMCP(
@@ -75,6 +80,11 @@ def diagnose(error_text: str) -> str:
     )
 
 
+def build_http_app():
+    """Streamable-http Starlette app wrapped with Bearer gate (pure ASGI)."""
+    return McpBearerMiddleware(mcp.streamable_http_app())
+
+
 async def _selftest():
     from mcp_server.tools.search_errors.handler import handle as search_errors
     from mcp_server.tools.list_families.handler import handle as list_families
@@ -105,9 +115,12 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "selftest":
         import asyncio
         asyncio.run(_selftest())
-    else:
-        print(f"🧩 Error DNA MCP on http://{mcp.settings.host}:{mcp.settings.port}/mcp")
-        mcp.run(transport="streamable-http")
+        return
+
+    host = os.getenv("MCP_HOST", "0.0.0.0")
+    port = int(os.getenv("MCP_PORT", "3333"))
+    print(f"🧩 Error DNA MCP on http://{host}:{port}/mcp (Bearer required)")
+    uvicorn.run(build_http_app(), host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":

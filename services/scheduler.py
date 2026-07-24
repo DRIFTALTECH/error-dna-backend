@@ -109,8 +109,9 @@ async def one_scrape():
         if not creds:
             creds = await read("SELECT * FROM credentials LIMIT 1")
         cred = creds[0] if creds else None
+        account_label = (cred.get("label") if cred else None) or ""
         rt("account", "ok" if cred else "warn",
-           f"Assigned {cred['label']}" if cred else "No credential configured")
+           f"Assigned {account_label}" if account_label else "No credential configured")
 
         # Atomic claim — closes the race where two API processes both SELECT the
         # same pending row during the pre-scrape sleeps and then fight over Chrome.
@@ -151,9 +152,9 @@ async def one_scrape():
             log(f"❌ FAILED: {result['error']}")
             await write("UPDATE urls SET status='failed', error_message=? WHERE id=?", (result["error"], url["id"]))
             await write(
-                "INSERT INTO scrape_log(url_id,source_id,status,duration_ms,error_message,trace) VALUES(?,?,?,?,?,?)",
+                "INSERT INTO scrape_log(url_id,source_id,status,duration_ms,error_message,trace,account_label) VALUES(?,?,?,?,?,?,?)",
                 (url["id"], url["source_id"], "failed", int((time.time() - t0) * 1000),
-                 result["error"], _json.dumps(run_trace)),
+                 result["error"], _json.dumps(run_trace), account_label or None),
             )
             return
 
@@ -190,9 +191,9 @@ async def one_scrape():
                 _blob_del(meta.get("key", ""))
             await write("UPDATE urls SET status='failed', error_message=? WHERE id=?", (f"LLM:{e}", url["id"]))
             await write(
-                "INSERT INTO scrape_log(url_id,source_id,status,duration_ms,error_message,trace) VALUES(?,?,?,?,?,?)",
+                "INSERT INTO scrape_log(url_id,source_id,status,duration_ms,error_message,trace,account_label) VALUES(?,?,?,?,?,?,?)",
                 (url["id"], url["source_id"], "failed", int((time.time() - t0) * 1000),
-                 f"LLM:{e}", _json.dumps(run_trace)),
+                 f"LLM:{e}", _json.dumps(run_trace), account_label or None),
             )
             return
         await asyncio.sleep(5)
@@ -228,9 +229,9 @@ async def one_scrape():
         rt("embed", "ok" if emb["ok"] else "error", emb["message"], emb.get("detail"))
         rt("done", "ok", "Run completed successfully")
         await write(
-            "INSERT INTO scrape_log(url_id,source_id,status,action,duration_ms,trace) VALUES(?,?,?,?,?,?)",
+            "INSERT INTO scrape_log(url_id,source_id,status,action,duration_ms,trace,account_label) VALUES(?,?,?,?,?,?,?)",
             (url["id"], url["source_id"], "success", "create", int((time.time() - t0) * 1000),
-             _json.dumps(run_trace)),
+             _json.dumps(run_trace), account_label or None),
         )
 
         dur = int((time.time() - t0) * 1000)

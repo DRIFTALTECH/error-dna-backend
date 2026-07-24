@@ -108,7 +108,23 @@ async def rotate_account():
     return {"active_account": active or "—", "ok": True}
 
 
-def _log_to_ui(row: dict, account: str) -> dict:
+def _account_from_trace(trace) -> str | None:
+    """Pull 'Assigned <label>' from the account phase of a stored trace."""
+    if not isinstance(trace, list):
+        return None
+    for step in trace:
+        if not isinstance(step, dict):
+            continue
+        if (step.get("phase") or "") != "account":
+            continue
+        msg = step.get("message") or ""
+        if msg.startswith("Assigned "):
+            label = msg[len("Assigned "):].strip()
+            return label or None
+    return None
+
+
+def _log_to_ui(row: dict) -> dict:
     raw = (row.get("status") or "").lower()
     status = "completed" if raw in ("success", "completed") else ("failed" if raw == "failed" else raw or "completed")
     note = row.get("source_id") or ""
@@ -124,6 +140,10 @@ def _log_to_ui(row: dict, account: str) -> dict:
             trace = json.loads(stored) if isinstance(stored, str) else stored
         except (json.JSONDecodeError, TypeError):
             trace = None
+
+    # Per-run account: column first, then trace "Assigned …", never the live active account.
+    account = (row.get("account_label") or "").strip() or _account_from_trace(trace) or "—"
+
     if not trace:
         trace = [
             {"at": ts, "phase": "queued", "status": "info", "message": "Scrape job accepted by scheduler"},
@@ -166,8 +186,8 @@ async def scheduler_logs(
         where.append("status = ?")
         params.append("success" if status == "completed" else status)
     if search:
-        where.append("(source_id LIKE ? OR error_message LIKE ?)")
-        params.extend([f"%{search}%", f"%{search}%"])
+        where.append("(source_id LIKE ? OR error_message LIKE ? OR account_label LIKE ? OR trace LIKE ?)")
+        params.extend([f"%{search}%"] * 4)
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     offset = (page - 1) * page_size
 
@@ -178,9 +198,8 @@ async def scheduler_logs(
         f"SELECT * FROM scrape_log {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
         params + [page_size, offset],
     )
-    account = await _active_account_label() or "—"
     return {
-        "items": [_log_to_ui(r, account) for r in rows],
+        "items": [_log_to_ui(r) for r in rows],
         "total": total,
         "total_pages": max(1, (total + page_size - 1) // page_size),
         "completed": completed,

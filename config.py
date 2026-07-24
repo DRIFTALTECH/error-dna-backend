@@ -41,6 +41,11 @@ EMBED_REGION = os.getenv("EMBED_REGION", AWS_REGION)
 PORT = int(os.getenv("PORT", "3000"))
 HOST = os.getenv("HOST", "0.0.0.0")
 
+# MCP (streamable-http). Public URL shown in Developer Settings; override in .env.
+MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
+MCP_PORT = int(os.getenv("MCP_PORT", "3333"))
+MCP_PUBLIC_URL = os.getenv("MCP_PUBLIC_URL", "").rstrip("/")
+
 # Scheduler defaults
 MIN_DELAY_MIN = int(os.getenv("MIN_DELAY_MIN", "5"))
 MAX_DELAY_MIN = int(os.getenv("MAX_DELAY_MIN", "60"))
