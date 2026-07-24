@@ -51,9 +51,30 @@ def build_user_prompt(raw_text: str) -> str:
     return f"Summarize this technical article:\n\n{truncated}"
 
 
-async def summarize(raw_text: str) -> dict:
+def _image_directive(images: list) -> tuple[str, str]:
+    """Extra system rule + user block so the (text-only) LLM places image tokens by
+    context. Returns (system_extra, user_extra). Empty when there are no images."""
+    if not images:
+        return "", ""
+    sys_extra = (
+        "\n\nIMAGES: The article has attached images, listed at the end with their context. "
+        "In the `summary` and/or `steps` output, insert the token {image_N} (e.g. {image_1}) "
+        "on its OWN line at the single most relevant point for each image, judging from its "
+        "context text. Use each token exactly once, never invent tokens, and keep the exact "
+        "{image_N} spelling so the app can swap in the real image."
+    )
+    lines = ["\n\nATTACHED IMAGES (place each token where it best fits):"]
+    for im in images:
+        ctx = (im.get("context") or im.get("alt") or "").strip()[:300]
+        lines.append(f"- {{{im['ref']}}} — context: {ctx or '(no caption)'}")
+    return sys_extra, "\n".join(lines)
+
+
+async def summarize(raw_text: str, images: list = None) -> dict:
     """
     Call the LLM API to generate a clean summary.
+    If `images` (list of {ref, context, alt}) is given, the model interleaves
+    {image_N} placeholder tokens into summary/steps by textual context.
     Returns structured dict or raises on failure.
     """
     if not LLM_API_KEY or LLM_API_KEY == "your-deepseek-api-key-here":
@@ -64,11 +85,12 @@ async def summarize(raw_text: str) -> dict:
         "Content-Type": "application/json",
     }
 
+    sys_extra, user_extra = _image_directive(images or [])
     payload = {
         "model": LLM_MODEL,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_user_prompt(raw_text)},
+            {"role": "system", "content": SYSTEM_PROMPT + sys_extra},
+            {"role": "user", "content": build_user_prompt(raw_text) + user_extra},
         ],
         "temperature": 0.3,
         "max_tokens": 4000,

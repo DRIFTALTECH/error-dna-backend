@@ -68,8 +68,24 @@ async def _process_one(url: dict) -> None:
         logger.warning(f"community #{url['source_id']} scrape failed: {err}")
         return
 
+    # Persist scraped images (S3 or local), keep briefs for the summarizer +
+    # a manifest {ref: {key, alt}} for the frontend to render.
+    from services.image_store import save as _img_save
+    briefs, manifest = [], {}
+    for im in (result.get("images") or []):
+        try:
+            key = await asyncio.to_thread(_img_save, __import__("base64").b64decode(im["data_b64"]), im.get("ext", "png"))
+        except Exception as e:
+            logger.warning(f"community image save failed: {e}")
+            continue
+        briefs.append({"ref": im["ref"], "context": im.get("context", ""), "alt": im.get("alt", "")})
+        manifest[im["ref"]] = {"key": key, "alt": im.get("alt", "")}
+    if manifest:
+        trace.append({"at": datetime.now(IST).strftime("%H:%M:%S"), "phase": "images",
+                      "status": "ok", "message": f"Saved {len(manifest)} image(s)", "detail": ", ".join(manifest)})
+
     try:
-        summary = await summarize(result.get("clean_text") or result.get("raw_text") or "")
+        summary = await summarize(result.get("clean_text") or result.get("raw_text") or "", images=briefs)
     except Exception as e:
         trace.append({"at": datetime.now(IST).strftime("%H:%M:%S"), "phase": "summarize",
                       "status": "error", "message": "LLM summarization failed", "detail": str(e)})
@@ -78,17 +94,29 @@ async def _process_one(url: dict) -> None:
         logger.warning(f"community #{url['source_id']} LLM failed: {e}")
         return
 
+    # Keep only images the model actually placed; delete the rest (no orphan storage).
+    blob = _s(summary.get("summary")) + " " + _s(summary.get("steps"))
+    from services.image_store import delete as _img_del
+    used = {}
+    for ref, meta in manifest.items():
+        if "{" + ref + "}" in blob:
+            used[ref] = meta
+        else:
+            _img_del(meta["key"])
+    manifest = used
+
     now = datetime.now(IST).isoformat()
     await write(
         """INSERT INTO community_summaries(source_id, url_id, title, family, area, type, issue, summary, steps,
-           gotchas, tags, source_version, source_date, source_url, component, environment, is_latest,
+           gotchas, tags, source_version, source_date, source_url, component, environment, images, is_latest,
            verification_status, created_at, updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'current',?,?)""",
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'current',?,?)""",
         (url["source_id"], url["id"], _s(summary.get("title")) or url.get("title") or "Untitled",
          _s(summary.get("family")), _s(summary.get("area")), _s(summary.get("type")),
          _s(summary.get("issue")), _s(summary.get("summary")), _s(summary.get("steps")),
          _s(summary.get("gotchas")), _s(summary.get("tags")), 1, url.get("released_on"),
-         url["source_url"], url.get("component"), _s(summary.get("environment", "[]")), now, now),
+         url["source_url"], url.get("component"), _s(summary.get("environment", "[]")),
+         _s(manifest), now, now),
     )
     await write("UPDATE community_urls SET status='completed', scraped_at=? WHERE id=?", (now, url["id"]))
     trace.append({"at": datetime.now(IST).strftime("%H:%M:%S"), "phase": "done",

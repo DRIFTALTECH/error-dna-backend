@@ -252,6 +252,8 @@ async def init_db():
         await conn.execute(SCHEMA)
         # Added after scrape_log shipped — store the full per-run step trace as JSON.
         await conn.execute("ALTER TABLE scrape_log ADD COLUMN IF NOT EXISTS trace TEXT;")
+        # Community images manifest: {"image_1": {"key":..., "alt":...}, ...}
+        await conn.execute("ALTER TABLE community_summaries ADD COLUMN IF NOT EXISTS images TEXT;")
         # Clock for 24h (configurable) auto account rotate.
         await conn.execute(
             "ALTER TABLE scheduler_config ADD COLUMN IF NOT EXISTS account_activated_at TEXT;"

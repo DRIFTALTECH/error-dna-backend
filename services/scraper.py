@@ -698,10 +698,66 @@ def _scrape_note_locked(url: str, username: str = None, password: str = None) ->
 COMMUNITY_LOADING_WAITS = 10
 
 
+MAX_COMMUNITY_IMAGES = 6
+
+# In-page: collect content images (skip avatars/icons/emoji), each with its ALT,
+# the nearby text (context for placement), and the bytes as a data URL — fetched
+# in-page so the browser's Cloudflare cookie is used (the CDN is gated too).
+_IMAGES_FN = r"""async ()=>{
+  const clean = s => (s||'').replace(/\s+/g,' ').trim();
+  const imgs = [...document.querySelectorAll('img')].filter(i =>
+    i.offsetParent && i.naturalWidth > 80 && i.naturalHeight > 80 &&
+    !/avatar|emoji|icon|rank|badge|sprite|logo|smiley/i.test((i.src||'')+(i.className||'')));
+  const seen = new Set(); const out = [];
+  for (const i of imgs) {
+    if (out.length >= %MAX%) break;
+    const src = i.src; if (!src || seen.has(src)) continue; seen.add(src);
+    // context = alt, figure caption, or the text of the nearest block ancestor.
+    let ctx = clean(i.alt);
+    const fig = i.closest('figure'); if (fig) ctx = clean(fig.textContent) || ctx;
+    if (!ctx) { let n = i.parentElement; for (let k=0;k<4&&n;k++){ const t=clean(n.textContent); if (t.length>15){ctx=t;break;} n=n.parentElement; } }
+    let dataUrl = '';
+    try { const r = await fetch(src); const b = await r.blob();
+      if (b.size < 4_000_000) dataUrl = await new Promise(res=>{const fr=new FileReader();fr.onload=()=>res(fr.result);fr.onerror=()=>res('');fr.readAsDataURL(b);}); } catch(e){}
+    out.push({ src, alt: clean(i.alt).slice(0,120), context: ctx.slice(0,400), dataUrl });
+  }
+  return JSON.stringify(out);
+}""".replace("%MAX%", str(MAX_COMMUNITY_IMAGES))
+
+
+def _extract_community_images() -> list:
+    """Return [{ref,'src','alt','context','data_b64','ext'}] for content images on the page."""
+    ok, out = _run(["evaluate", "--fn", _IMAGES_FN], timeout=45)
+    try:
+        raw = json.loads(out) if out else []
+    except Exception:
+        raw = []
+    images = []
+    for idx, im in enumerate(raw, 1):
+        data_url = im.get("dataUrl") or ""
+        if not data_url.startswith("data:image/"):
+            continue
+        try:
+            header, b64 = data_url.split(",", 1)
+            ext = header.split("/", 1)[1].split(";", 1)[0].lower()  # data:image/png;base64
+            ext = {"jpeg": "jpg", "svg+xml": "svg"}.get(ext, ext)
+        except Exception:
+            continue
+        images.append({
+            "ref": f"image_{idx}",
+            "src": im.get("src", ""),
+            "alt": im.get("alt", ""),
+            "context": im.get("context", ""),
+            "data_b64": b64,
+            "ext": ext,
+        })
+    return images
+
+
 def scrape_community(url: str) -> dict:
     """Scrape a public SAP Community page. No login — navigate, wait out the
-    Cloudflare challenge + render, extract the main text.
-    Returns { success, raw_text, clean_text, title, error, trace }."""
+    Cloudflare challenge + render, extract the main text + content images.
+    Returns { success, raw_text, clean_text, title, images, error, trace }."""
     with _BROWSER_LOCK:
         return _scrape_community_locked(url)
 
@@ -750,8 +806,21 @@ def _scrape_community_locked(url: str) -> dict:
     # summarizer prompt already strips nav/chrome, so hand it the full text.
     tr("parse", "ok", f"Extracted {len(text)} chars",
        title[:60] if title else None)
+
+    # Content images + their placement context (best-effort; never blocks).
+    images = []
+    try:
+        images = _extract_community_images()
+        if images:
+            tr("images", "ok", f"Captured {len(images)} image(s)",
+               ", ".join(i["ref"] for i in images))
+        else:
+            tr("images", "info", "No content images")
+    except Exception as e:
+        tr("images", "warn", "Image capture failed — text only", str(e))
+
     return {"success": True, "raw_text": text, "clean_text": text,
-            "title": title, "trace": trace}
+            "title": title, "images": images, "trace": trace}
 
 
 if __name__ == "__main__":

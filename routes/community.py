@@ -225,12 +225,28 @@ async def list_summaries(
     )
 
 
+def _resolve_images(raw) -> dict:
+    """Manifest {ref:{key,alt}} → {ref:{url,alt}} with a loadable URL per image."""
+    import json as _json
+    if not raw:
+        return {}
+    try:
+        manifest = _json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return {}
+    from services.image_store import url as _img_url
+    return {ref: {"url": _img_url(meta.get("key", "")), "alt": meta.get("alt", "")}
+            for ref, meta in manifest.items() if isinstance(meta, dict)}
+
+
 @router.get("/summaries/{summary_id}")
 async def get_summary(summary_id: int):
     rows = await read("SELECT * FROM community_summaries WHERE id = ?", (summary_id,))
     if not rows:
         raise HTTPException(404, "Summary not found")
-    return _summary_to_ui(rows[0])
+    ui = _summary_to_ui(rows[0])
+    ui["images"] = _resolve_images(rows[0].get("images"))
+    return ui
 
 
 class ChatBody(BaseModel):
