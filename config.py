@@ -32,6 +32,11 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_API_URL = os.getenv("LLM_API_URL", "https://api.deepseek.com/v1/chat/completions")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 
+# Embeddings — Amazon Titan Text Embeddings V2 via Bedrock (same AWS creds as Aurora IAM).
+EMBED_MODEL_ID = os.getenv("EMBED_MODEL_ID", "amazon.titan-embed-text-v2:0")
+EMBED_DIMENSIONS = int(os.getenv("EMBED_DIMENSIONS", "1024"))
+EMBED_REGION = os.getenv("EMBED_REGION", AWS_REGION)
+
 # Server
 PORT = int(os.getenv("PORT", "3000"))
 HOST = os.getenv("HOST", "0.0.0.0")

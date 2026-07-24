@@ -70,11 +70,23 @@ def _image_directive(images: list) -> tuple[str, str]:
     return sys_extra, "\n".join(lines)
 
 
-async def summarize(raw_text: str, images: list = None) -> dict:
+_SKIP_DIRECTIVE = (
+    "\n\nNOT-A-SOLUTION CHECK: This source may be a blog, announcement, product news, "
+    "opinion, roadmap, or general discussion rather than a specific technical PROBLEM with "
+    "a concrete SOLUTION/answer. If it is NOT a problem+solution, do NOT summarize it — "
+    'output EXACTLY this JSON and nothing else: {"is_solution": false, "skip_reason": '
+    '"<one short sentence, e.g. This is a blog post, not a problem/solution>"}. '
+    "Only produce the normal summary JSON when there is a real problem AND its resolution."
+)
+
+
+async def summarize(raw_text: str, images: list = None, allow_skip: bool = False) -> dict:
     """
     Call the LLM API to generate a clean summary.
     If `images` (list of {ref, context, alt}) is given, the model interleaves
     {image_N} placeholder tokens into summary/steps by textual context.
+    If `allow_skip` is True (community pages), the model may return
+    {"is_solution": false, "skip_reason": ...} for blogs/non-solutions.
     Returns structured dict or raises on failure.
     """
     if not LLM_API_KEY or LLM_API_KEY == "your-deepseek-api-key-here":
@@ -86,6 +98,8 @@ async def summarize(raw_text: str, images: list = None) -> dict:
     }
 
     sys_extra, user_extra = _image_directive(images or [])
+    if allow_skip:
+        sys_extra += _SKIP_DIRECTIVE
     payload = {
         "model": LLM_MODEL,
         "messages": [
@@ -121,6 +135,11 @@ async def summarize(raw_text: str, images: list = None) -> dict:
             else:
                 raise ValueError(f"Could not parse LLM response as JSON: {content[:200]}")
 
+        # Blog / non-solution short-circuit (community only, when allow_skip=True).
+        if summary.get("is_solution") is False:
+            return {"is_solution": False,
+                    "skip_reason": summary.get("skip_reason", "Not a problem/solution")}
+
         # Ensure all required fields exist as strings for DB storage
         steps = summary.get("steps", [])
         gotchas = summary.get("gotchas", [])
@@ -128,6 +147,7 @@ async def summarize(raw_text: str, images: list = None) -> dict:
         environment = summary.get("environment", [])
 
         return {
+            "is_solution": True,
             "title": summary.get("title", ""),
             "family": summary.get("family", ""),
             "area": summary.get("area", summary.get("family", "")),

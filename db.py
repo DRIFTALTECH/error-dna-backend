@@ -216,6 +216,21 @@ CREATE TABLE IF NOT EXISTS community_scrape_log (
     trace TEXT,
     created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
 );
+
+-- Vector store for summary chunks (title+family+issue+summary+tags+gotchas).
+-- Requires: CREATE EXTENSION vector; (applied in init_db).
+CREATE TABLE IF NOT EXISTS summary_embeddings (
+    id SERIAL PRIMARY KEY,
+    source TEXT NOT NULL,
+    summary_id INTEGER NOT NULL,
+    source_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    embedding vector(1024) NOT NULL,
+    model TEXT NOT NULL,
+    created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS'),
+    updated_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS'),
+    UNIQUE (source, summary_id)
+);
 """
 
 FAMILIES_SEED = """
@@ -249,6 +264,8 @@ async def init_db():
     """Create schema + seed rows (idempotent). Uses private connect — DDL only."""
     conn = await _connect()
     try:
+        # pgvector — required before summary_embeddings (vector column type).
+        await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
         await conn.execute(SCHEMA)
         # Added after scrape_log shipped — store the full per-run step trace as JSON.
         await conn.execute("ALTER TABLE scrape_log ADD COLUMN IF NOT EXISTS trace TEXT;")

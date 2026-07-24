@@ -85,13 +85,27 @@ async def _process_one(url: dict) -> None:
                       "status": "ok", "message": f"Saved {len(manifest)} image(s)", "detail": ", ".join(manifest)})
 
     try:
-        summary = await summarize(result.get("clean_text") or result.get("raw_text") or "", images=briefs)
+        summary = await summarize(result.get("clean_text") or result.get("raw_text") or "",
+                                  images=briefs, allow_skip=True)
     except Exception as e:
         trace.append({"at": datetime.now(IST).strftime("%H:%M:%S"), "phase": "summarize",
                       "status": "error", "message": "LLM summarization failed", "detail": str(e)})
         await write("UPDATE community_urls SET status='failed', error_message=? WHERE id=?", (f"LLM:{e}", url["id"]))
         await log_row("failed", "summarize", f"LLM:{e}")
         logger.warning(f"community #{url['source_id']} LLM failed: {e}")
+        return
+
+    # Blog / non-solution → skip: don't store as knowledge, record the reason, drop images.
+    if summary.get("is_solution") is False:
+        reason = summary.get("skip_reason") or "Not a problem/solution (e.g. a blog post)"
+        from services.image_store import delete as _img_del
+        for meta in manifest.values():
+            _img_del(meta.get("key", ""))
+        trace.append({"at": datetime.now(IST).strftime("%H:%M:%S"), "phase": "skip",
+                      "status": "info", "message": "Skipped — not a solution", "detail": reason})
+        await write("UPDATE community_urls SET status='skipped', error_message=? WHERE id=?", (reason, url["id"]))
+        await log_row("skipped", "skip", reason)
+        logger.info(f"community #{url['source_id']} skipped: {reason}")
         return
 
     # Keep only images the model actually placed; delete the rest (no orphan storage).
@@ -106,19 +120,30 @@ async def _process_one(url: dict) -> None:
     manifest = used
 
     now = datetime.now(IST).isoformat()
-    await write(
+    title = _s(summary.get("title")) or url.get("title") or "Untitled"
+    family = _s(summary.get("family"))
+    issue = _s(summary.get("issue"))
+    body = _s(summary.get("summary"))
+    tags = _s(summary.get("tags"))
+    gotchas = _s(summary.get("gotchas"))
+    inserted = await write(
         """INSERT INTO community_summaries(source_id, url_id, title, family, area, type, issue, summary, steps,
            gotchas, tags, source_version, source_date, source_url, component, environment, images, is_latest,
            verification_status, created_at, updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'current',?,?)""",
-        (url["source_id"], url["id"], _s(summary.get("title")) or url.get("title") or "Untitled",
-         _s(summary.get("family")), _s(summary.get("area")), _s(summary.get("type")),
-         _s(summary.get("issue")), _s(summary.get("summary")), _s(summary.get("steps")),
-         _s(summary.get("gotchas")), _s(summary.get("tags")), 1, url.get("released_on"),
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'current',?,?) RETURNING id""",
+        (url["source_id"], url["id"], title, family, _s(summary.get("area")), _s(summary.get("type")),
+         issue, body, _s(summary.get("steps")), gotchas, tags, 1, url.get("released_on"),
          url["source_url"], url.get("component"), _s(summary.get("environment", "[]")),
          _s(manifest), now, now),
     )
+    summary_id = inserted[0]["id"]
     await write("UPDATE community_urls SET status='completed', scraped_at=? WHERE id=?", (now, url["id"]))
+    # Vector chunk — best-effort; summary row already persisted.
+    from services.embeddings import embed_summary_safe
+    await embed_summary_safe("community", summary_id, url["source_id"], {
+        "title": title, "family": family, "issue": issue,
+        "summary": body, "tags": tags, "gotchas": gotchas,
+    })
     trace.append({"at": datetime.now(IST).strftime("%H:%M:%S"), "phase": "done",
                   "status": "ok", "message": "Stored in community knowledge base"})
     await log_row("success", "create")

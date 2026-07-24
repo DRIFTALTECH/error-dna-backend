@@ -188,17 +188,25 @@ async def one_scrape():
             return str(v)
 
         now = datetime.now(IST).isoformat()
-        await write(
+        inserted = await write(
             """INSERT INTO summaries(source_id,url_id,title,family,area,type,issue,summary,steps,gotchas,tags,
                source_version,source_date,source_url,component,environment,is_latest,verification_status,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'current',?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'current',?,?) RETURNING id""",
             (url["source_id"], url["id"], s(summary.get("title")), s(summary.get("family")),
              s(summary.get("area")), s(summary.get("type")), s(summary.get("issue")),
              s(summary.get("summary")), s(summary.get("steps")), s(summary.get("gotchas")),
              s(summary.get("tags")), 1, url.get("released_on"), url["source_url"],
              url.get("component"), s(summary.get("environment", "[]")), now, now),
         )
+        summary_id = inserted[0]["id"]
         await write("UPDATE urls SET status='completed', scraped_at=? WHERE id=?", (now, url["id"]))
+        # Vector chunk — best-effort; summary row already persisted.
+        from services.embeddings import embed_summary_safe
+        await embed_summary_safe("notes", summary_id, url["source_id"], {
+            "title": s(summary.get("title")), "family": s(summary.get("family")),
+            "issue": s(summary.get("issue")), "summary": s(summary.get("summary")),
+            "tags": s(summary.get("tags")), "gotchas": s(summary.get("gotchas")),
+        })
         rt("store", "ok", "Summary stored in knowledge base", "action: create")
         rt("done", "ok", "Run completed successfully")
         await write(
