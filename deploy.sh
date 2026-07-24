@@ -156,7 +156,7 @@ install_python() {
 
   sudo -u "$APP_USER" bash -c "cd '$APP_DIR' && .venv/bin/python -m services.scraper" >/dev/null \
     && ok "scraper classify() self-check passed" || warn "classify self-check failed"
-  sudo -u "$APP_USER" bash -c "cd '$APP_DIR' && .venv/bin/python mcp_server.py selftest" 2>/dev/null \
+  sudo -u "$APP_USER" bash -c "cd '$APP_DIR' && .venv/bin/python -m mcp_server selftest" 2>/dev/null \
     && ok "MCP selftest passed (DB reachable + IAM/creds valid)" \
     || warn "MCP selftest failed — check DB_* + AWS creds/role in .env, and Aurora SG allows this EC2's SG on 5432"
 }
@@ -168,7 +168,7 @@ write_services() {
   for svc in api mcp; do
     local desc exec
     if [ "$svc" = api ]; then desc="Error DNA API (FastAPI :$API_PORT)"; exec="main.py"
-    else desc="Error DNA MCP (streamable-http :$MCP_PORT/mcp)"; exec="mcp_server.py"; fi
+    else desc="Error DNA MCP (streamable-http :$MCP_PORT/mcp)"; exec="-m mcp_server"; fi
     cat >/etc/systemd/system/error-dna-$svc.service <<EOF
 [Unit]
 Description=$desc
