@@ -55,7 +55,9 @@ app.add_middleware(
 app.include_router(health_router)   # health checks / load balancers
 app.include_router(auth_router)     # POST /api/auth/login
 from routes.images import router as images_router
+from routes.files import router as files_router
 app.include_router(images_router)   # /api/community/images/<key> — <img> can't send a token
+app.include_router(files_router)    # /api/files/<key> — note attachments (local mode)
 
 # Everything else requires a valid Bearer token (login gates the whole app).
 _auth = [Depends(require_auth)]

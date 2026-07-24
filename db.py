@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS summaries (
     component TEXT,
     environment TEXT DEFAULT '[]',
     see_also TEXT DEFAULT '[]',
+    attachments TEXT,
     is_latest INTEGER DEFAULT 1,
     superseded_by_id INTEGER,
     verification_status TEXT DEFAULT 'current',
@@ -271,6 +272,8 @@ async def init_db():
         await conn.execute("ALTER TABLE scrape_log ADD COLUMN IF NOT EXISTS trace TEXT;")
         # Community images manifest: {"image_1": {"key":..., "alt":...}, ...}
         await conn.execute("ALTER TABLE community_summaries ADD COLUMN IF NOT EXISTS images TEXT;")
+        # Note attachments: [{"name":..., "key":"doc/…", "ext":...}, ...]
+        await conn.execute("ALTER TABLE summaries ADD COLUMN IF NOT EXISTS attachments TEXT;")
         # Clock for 24h (configurable) auto account rotate.
         await conn.execute(
             "ALTER TABLE scheduler_config ADD COLUMN IF NOT EXISTS account_activated_at TEXT;"

@@ -1,13 +1,12 @@
-"""Persist community post images. S3 when S3_BUCKET is set, else local disk (dev).
+"""Persist blobs (community images + note attachments). S3 when S3_BUCKET is set, else local disk.
 
 Public API:
-  save(data: bytes, ext: str) -> key            # store bytes, return an opaque key
-  url(key: str) -> str                          # a URL the frontend can load
-  delete(key: str) -> None                      # best-effort remove
+  save(data, ext, kind="img"|"doc") -> key
+  url(key, filename=None) -> str
+  delete(key) -> None
+  read_local(key) -> bytes | None
 
-Keys look like "img/<uuid>.<ext>". On S3 we return a presigned GET URL (private
-bucket, no public exposure); on local disk we return "/api/community/images/<key>"
-served by a FastAPI route.
+Keys: "img/<uuid>.<ext>" or "doc/<uuid>.<ext>". S3 → presigned GET; local → "/api/files/<key>".
 """
 
 import os
@@ -35,15 +34,30 @@ def using_s3() -> bool:
     return bool(S3_BUCKET)
 
 
-_CT = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
-       "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml"}
+_CT = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml",
+    "pdf": "application/pdf",
+    "doc": "application/msword",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xls": "application/vnd.ms-excel",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "zip": "application/zip",
+    "xml": "application/xml", "xsd": "application/xml", "wsdl": "application/xml",
+    "json": "application/json", "txt": "text/plain", "log": "text/plain",
+    "csv": "text/csv", "tsv": "text/tab-separated-values",
+    "yaml": "text/yaml", "yml": "text/yaml", "md": "text/markdown",
+    "html": "text/html", "sql": "application/sql",
+    "properties": "text/plain", "groovy": "text/plain", "java": "text/plain",
+}
 
 
-def save(data: bytes, ext: str) -> str:
-    """Store image bytes, return an opaque key. ext without leading dot."""
+def save(data: bytes, ext: str, kind: str = "img") -> str:
+    """Store bytes, return an opaque key. ext without leading dot. kind: img|doc."""
     import uuid
-    ext = (ext or "png").lstrip(".").lower()
-    key = f"img/{uuid.uuid4().hex}.{ext}"
+    ext = (ext or "bin").lstrip(".").lower()
+    kind = "doc" if kind == "doc" else "img"
+    key = f"{kind}/{uuid.uuid4().hex}.{ext}"
     if using_s3():
         _client().put_object(Bucket=S3_BUCKET, Key=key, Body=data,
                              ContentType=_CT.get(ext, "application/octet-stream"))
@@ -55,18 +69,26 @@ def save(data: bytes, ext: str) -> str:
     return key
 
 
-def url(key: str) -> str:
+def url(key: str, filename: str | None = None) -> str:
     """A URL the frontend can GET. Presigned for S3, API route for local."""
     if not key:
         return ""
     if using_s3():
         try:
+            params: dict = {"Bucket": S3_BUCKET, "Key": key}
+            if filename:
+                # Force download with the original note filename.
+                safe = filename.replace('"', "")
+                params["ResponseContentDisposition"] = f'attachment; filename="{safe}"'
             return _client().generate_presigned_url(
-                "get_object", Params={"Bucket": S3_BUCKET, "Key": key}, ExpiresIn=_PRESIGN_TTL)
+                "get_object", Params=params, ExpiresIn=_PRESIGN_TTL)
         except Exception as e:
             logger.warning(f"presign failed for {key}: {e}")
             return ""
-    return f"/api/community/images/{key}"
+    # Local: community images historically used /api/community/images/; both work.
+    if key.startswith("img/"):
+        return f"/api/community/images/{key}"
+    return f"/api/files/{key}"
 
 
 def read_local(key: str) -> bytes | None:
@@ -94,12 +116,14 @@ def delete(key: str) -> None:
 
 
 if __name__ == "__main__":
-    # self-check (local mode): save → url → read → delete
     k = save(b"\x89PNG\r\n\x1a\n-test", "png")
     assert k.startswith("img/") and k.endswith(".png"), k
     assert read_local(k) == b"\x89PNG\r\n\x1a\n-test"
     assert url(k) == f"/api/community/images/{k}"
-    assert read_local("../../etc/passwd") is None  # traversal blocked
+    d = save(b"%PDF-test", "pdf", kind="doc")
+    assert d.startswith("doc/") and url(d) == f"/api/files/{d}"
+    assert read_local("../../etc/passwd") is None
     delete(k)
+    delete(d)
     assert read_local(k) is None
     print("✅ image_store self-check passed (local mode)")

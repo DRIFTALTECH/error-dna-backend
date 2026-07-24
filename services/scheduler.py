@@ -160,6 +160,19 @@ async def one_scrape():
         log(f"✅ {len(result.get('clean_text',''))} chars cleaned")
         await asyncio.sleep(5)
 
+        # Persist note attachments (S3 or local) before LLM — keep a name→key manifest.
+        from services.image_store import save as _blob_save
+        att_manifest = []
+        for a in (result.get("attachments") or []):
+            try:
+                key = await asyncio.to_thread(_blob_save, a["data"], a.get("ext", "bin"), "doc")
+                att_manifest.append({"name": a["name"], "key": key, "ext": a.get("ext", "")})
+            except Exception as e:
+                log(f"  ⚠️ attachment save failed ({a.get('name')}): {e}")
+        if att_manifest:
+            rt("attachments", "ok", f"Saved {len(att_manifest)} attachment(s)",
+               ", ".join(a["name"] for a in att_manifest))
+
         log("LLM summarizing...")
         rt("summarize", "info", "Sending article to LLM for summarization")
         try:
@@ -171,6 +184,10 @@ async def one_scrape():
         except Exception as e:
             log(f"❌ LLM failed: {e}")
             rt("summarize", "error", "LLM summarization failed", str(e))
+            # Drop orphan blobs if we never store a summary.
+            from services.image_store import delete as _blob_del
+            for meta in att_manifest:
+                _blob_del(meta.get("key", ""))
             await write("UPDATE urls SET status='failed', error_message=? WHERE id=?", (f"LLM:{e}", url["id"]))
             await write(
                 "INSERT INTO scrape_log(url_id,source_id,status,duration_ms,error_message,trace) VALUES(?,?,?,?,?,?)",
@@ -190,13 +207,13 @@ async def one_scrape():
         now = datetime.now(IST).isoformat()
         inserted = await write(
             """INSERT INTO summaries(source_id,url_id,title,family,area,type,issue,summary,steps,gotchas,tags,
-               source_version,source_date,source_url,component,environment,is_latest,verification_status,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'current',?,?) RETURNING id""",
+               source_version,source_date,source_url,component,environment,attachments,is_latest,verification_status,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'current',?,?) RETURNING id""",
             (url["source_id"], url["id"], s(summary.get("title")), s(summary.get("family")),
              s(summary.get("area")), s(summary.get("type")), s(summary.get("issue")),
              s(summary.get("summary")), s(summary.get("steps")), s(summary.get("gotchas")),
              s(summary.get("tags")), 1, url.get("released_on"), url["source_url"],
-             url.get("component"), s(summary.get("environment", "[]")), now, now),
+             url.get("component"), s(summary.get("environment", "[]")), s(att_manifest), now, now),
         )
         summary_id = inserted[0]["id"]
         await write("UPDATE urls SET status='completed', scraped_at=? WHERE id=?", (now, url["id"]))

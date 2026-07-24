@@ -511,11 +511,10 @@ _ATTACH_EXT_RE = r"\\.(xsd|xml|wsdl|pdf|txt|json|log|csv|tsv|docx|xlsx|zip|prope
 
 
 def _fetch_attachments() -> tuple[str, list]:
-    """Open the note's Attachments tab, download each file, extract its text.
+    """Open the note's Attachments tab, download each file, extract text + keep bytes.
 
-    Returns (combined_text, [filenames]). Best-effort — any failure yields ("", []).
-    Proven flow: click 'Attachments' tab → click each file cell (triggers a browser
-    download) → read the file off disk → extract text.
+    Returns (combined_text, [{name, ext, data}]). Best-effort — any failure → ("", []).
+    Caller persists `data` (S3/local) then discards; we still wipe the download dir.
     """
     from services.attachments import extract_text, SUPPORTED_EXTS, MAX_ATTACH_CHARS
 
@@ -530,10 +529,10 @@ def _fetch_attachments() -> tuple[str, list]:
                     "()=>{const s=[...document.querySelectorAll('span,td,a')].filter(e=>e.offsetParent&&/" + _ATTACH_EXT_RE +
                     "/i.test((e.textContent||'').trim()));"
                     "return JSON.stringify([...new Set(s.map(e=>(e.textContent||'').trim()))].slice(0,10))}"], timeout=15)
-    try:
-        files = json.loads(out) if out else []
-    except Exception:
+    files = _decode_json(out) if out else []
+    if not isinstance(files, list):
         files = []
+    files = [f for f in files if isinstance(f, str) and f.strip()]
     if not files:
         return "", []
 
@@ -558,22 +557,30 @@ def _fetch_attachments() -> tuple[str, list]:
         logger.warning(f"  ⚠️ {len(files)} attachment(s) detected but none captured in "
                        f"{_DOWNLOAD_DIR} — set SCRAPE_DOWNLOAD_DIR to the browser's real download dir")
 
-    # 5. extract text (capped), then DELETE everything we downloaded — zero disk retention.
-    combined, names, total = [], [], 0
+    # 5. read bytes for storage + extract text for the LLM, then wipe local downloads.
+    combined, attachments, total = [], [], 0
     try:
         for p in downloaded:
-            if _os.path.splitext(p)[1].lower() not in SUPPORTED_EXTS:
+            name = _os.path.basename(p)
+            ext = _os.path.splitext(name)[1].lstrip(".").lower() or "bin"
+            try:
+                with open(p, "rb") as f:
+                    data = f.read()
+            except OSError as e:
+                logger.warning(f"  ⚠️ could not read attachment {name}: {e}")
+                continue
+            if not data:
+                continue
+            attachments.append({"name": name, "ext": ext, "data": data})
+            if f".{ext}" not in SUPPORTED_EXTS:
                 continue
             text = extract_text(p)
-            if not text.strip():
+            if not text.strip() or total >= MAX_ATTACH_CHARS:
                 continue
             chunk = text[: max(0, MAX_ATTACH_CHARS - total)]
-            if not chunk:
-                break
-            combined.append(f"--- ATTACHMENT: {_os.path.basename(p)} ---\n{chunk}")
-            names.append(_os.path.basename(p))
+            combined.append(f"--- ATTACHMENT: {name} ---\n{chunk}")
             total += len(chunk)
-        return "\n\n".join(combined), names
+        return "\n\n".join(combined), attachments
     finally:
         for p in downloaded:
             try:
@@ -663,15 +670,17 @@ def _scrape_note_locked(url: str, username: str = None, password: str = None) ->
                   "detail": f"{len(clean_text)} chars cleaned"})
 
     # Best-effort: download + extract attachment text, append for the LLM. Never blocks.
+    # attachments = [{name, ext, data}] — scheduler persists data to S3/local.
     attachments = []
     try:
         att_text, attachments = _fetch_attachments()
-        if att_text:
-            clean_text = clean_text + "\n\n" + att_text
-            text = text + "\n\n" + att_text
+        if attachments:
+            if att_text:
+                clean_text = clean_text + "\n\n" + att_text
+                text = text + "\n\n" + att_text
             trace.append({"at": _ts(), "phase": "attachments", "status": "ok",
                           "message": f"Attached {len(attachments)} file(s)",
-                          "detail": ", ".join(attachments)})
+                          "detail": ", ".join(a["name"] for a in attachments)})
         else:
             trace.append({"at": _ts(), "phase": "attachments", "status": "info",
                           "message": "No attachments"})
@@ -725,15 +734,32 @@ _IMAGES_FN = r"""async ()=>{
 }""".replace("%MAX%", str(MAX_COMMUNITY_IMAGES))
 
 
+def _decode_json(out: str):
+    """Decode openclaw evaluate output. JSON.stringify returns are often
+    double-wrapped in quotes — peel up to twice (same pattern as _probe)."""
+    val = (out or "").strip()
+    for _ in range(2):
+        if isinstance(val, (dict, list)):
+            break
+        try:
+            val = json.loads(val)
+        except Exception:
+            return None
+    return val
+
+
 def _extract_community_images() -> list:
     """Return [{ref,'src','alt','context','data_b64','ext'}] for content images on the page."""
     ok, out = _run(["evaluate", "--fn", _IMAGES_FN], timeout=45)
-    try:
-        raw = json.loads(out) if out else []
-    except Exception:
-        raw = []
+    if not ok or not out:
+        return []
+    raw = _decode_json(out)
+    if not isinstance(raw, list):
+        return []
     images = []
     for idx, im in enumerate(raw, 1):
+        if not isinstance(im, dict):
+            continue
         data_url = im.get("dataUrl") or ""
         if not data_url.startswith("data:image/"):
             continue

@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS summaries (
     component            TEXT,
     environment          TEXT DEFAULT '[]',
     see_also             TEXT DEFAULT '[]',
+    attachments          TEXT,                      -- JSON [{name,key,ext}] S3/local docs
     is_latest            INTEGER DEFAULT 1,
     superseded_by_id     INTEGER,
     verification_status  TEXT DEFAULT 'current',

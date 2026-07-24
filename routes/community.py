@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from db import read, write
 from models import PaginatedResponse
-from routes.summaries import _summary_to_ui
+from routes.summaries import _summary_to_ui, _embedding_status
 from services import community_ingest
 
 router = APIRouter(prefix="/api/community", tags=["community"])
@@ -246,6 +246,7 @@ async def get_summary(summary_id: int):
         raise HTTPException(404, "Summary not found")
     ui = _summary_to_ui(rows[0])
     ui["images"] = _resolve_images(rows[0].get("images"))
+    ui["embedding_status"] = await _embedding_status("community", summary_id)
     return ui
 
 

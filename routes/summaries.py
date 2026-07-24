@@ -66,7 +66,42 @@ def _summary_to_ui(row: dict) -> dict:
         "version": str(row["source_version"]) if row.get("source_version") is not None else "1",
         "source_date": row.get("source_date"),
         "stored_at": row.get("created_at"),
+        "source_url": row.get("source_url") or "",
     }
+
+
+async def _embedding_status(source: str, summary_id: int) -> str:
+    """'saved' if a vector row exists for this summary, else 'missing'."""
+    rows = await read(
+        "SELECT id FROM summary_embeddings WHERE source = ? AND summary_id = ? LIMIT 1",
+        (source, summary_id),
+    )
+    return "saved" if rows else "missing"
+
+
+def _resolve_attachments(raw) -> list:
+    """Manifest [{name,key,ext}] → [{name,url,ext}] with loadable URLs."""
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    from services.image_store import url as _blob_url
+    out = []
+    for a in raw:
+        if not isinstance(a, dict) or not a.get("key"):
+            continue
+        name = a.get("name") or "attachment"
+        out.append({
+            "name": name,
+            "ext": a.get("ext") or "",
+            "url": _blob_url(a["key"], filename=name),
+        })
+    return out
 
 
 @router.get("/dashboard", response_model=DashboardResponse)
@@ -147,7 +182,10 @@ async def get_summary(summary_id: int):
     rows = await read("SELECT * FROM summaries WHERE id = ?", (summary_id,))
     if not rows:
         raise HTTPException(404, "Summary not found")
-    return _summary_to_ui(rows[0])
+    ui = _summary_to_ui(rows[0])
+    ui["attachments"] = _resolve_attachments(rows[0].get("attachments"))
+    ui["embedding_status"] = await _embedding_status("notes", summary_id)
+    return ui
 
 
 class ChatBody(BaseModel):

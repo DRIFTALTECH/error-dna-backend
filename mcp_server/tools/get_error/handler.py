@@ -1,14 +1,16 @@
 """get_error — business logic + markdown helper for the error:// resource."""
 
 from db import read
-from routes.summaries import _summary_to_ui
+from routes.summaries import _summary_to_ui, _resolve_attachments
 
 
 async def handle(id: int) -> dict:
     rows = await read("SELECT * FROM summaries WHERE id = ?", (id,))
     if not rows:
         return {"error": f"No summary with id {id}"}
-    return _summary_to_ui(rows[0])
+    ui = _summary_to_ui(rows[0])
+    ui["attachments"] = _resolve_attachments(rows[0].get("attachments"))
+    return ui
 
 
 def format_fix(d: dict) -> str:

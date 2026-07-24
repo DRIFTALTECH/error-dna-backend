@@ -19,7 +19,7 @@ async def families():
     out = []
     for r in rows:
         err_rows = await read(
-            "SELECT id, title, updated_at FROM summaries WHERE family=? AND is_latest=1 ORDER BY updated_at DESC LIMIT 10",
+            "SELECT id, title, updated_at FROM summaries WHERE family=? AND is_latest=1 ORDER BY updated_at DESC",
             (r["name"],),
         )
         errors = [{
