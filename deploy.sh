@@ -122,6 +122,27 @@ EOF
   ok "caddy $(caddy version | head -1)"
 }
 
+# ---- swap ------------------------------------------------------------------
+# t3.small is 2 GB with no swap. api + mcp + node gateway + headless Chrome
+# overshoot when the notes scheduler and the community drain are both on, and
+# the kernel OOM-killer takes the API down. 2 G of swap absorbs the peak.
+setup_swap() {
+  log "swap file (2G — 2 GB box runs Chrome + 2 python services)"
+  if swapon --show 2>/dev/null | grep -q /swapfile; then
+    ok "swap already on"
+  else
+    fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+    chmod 600 /swapfile
+    mkswap /swapfile >/dev/null
+    swapon /swapfile
+    ok "2G swap on"
+  fi
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >>/etc/fstab
+  # Prefer reclaiming page cache over swapping; swap is the safety net, not the plan.
+  sysctl -w vm.swappiness=10 >/dev/null
+  grep -q '^vm.swappiness' /etc/sysctl.conf || echo 'vm.swappiness=10' >>/etc/sysctl.conf
+}
+
 # ---- node + openclaw (scraper/login-test; best-effort) ---------------------
 install_openclaw() {
   log "Node $NODE_MAJOR + openclaw (scraper / login-test)"
@@ -269,6 +290,7 @@ case "${1:-deploy}" in
   deploy)
     preflight
     install_system
+    setup_swap
     install_openclaw
     install_python
     write_services
@@ -276,7 +298,8 @@ case "${1:-deploy}" in
     smoke
     print_urls
     ;;
+  swap)   need_root; setup_swap ;;
   test)   need_root; smoke ;;
   status) need_root; status ;;
-  *) die "unknown command '$1' (deploy | test | status)" ;;
+  *) die "unknown command '$1' (deploy | swap | test | status)" ;;
 esac

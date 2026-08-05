@@ -17,6 +17,7 @@
 --   community_scrape_log→ per-run community scrape audit + JSON trace
 --   error_families      → taxonomy seed (10 families)
 --   app_users           → app login (NOT the shared `users` table)
+--   app_settings        → key/value (MCP server URL + bearer, etc.)
 -- =============================================================================
 
 -- Required for summary_embeddings.embedding
@@ -233,6 +234,17 @@ CREATE TABLE IF NOT EXISTS summary_embeddings (
     created_at      TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS'),
     updated_at      TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS'),
     UNIQUE (source, summary_id)
+);
+
+
+-- -----------------------------------------------------------------------------
+-- App settings (Developer → MCP server URL + encrypted bearer, etc.)
+-- Keys used: mcp_server_url, mcp_bearer_token
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS app_settings (
+    key             TEXT PRIMARY KEY,
+    value           TEXT NOT NULL,
+    updated_at      TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
 );
 
 

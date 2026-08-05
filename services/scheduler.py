@@ -5,6 +5,7 @@ from datetime import datetime, timezone, timedelta
 
 from config import ACCOUNT_ROTATE_HOURS
 from db import read, write
+from services import community_ingest
 from services.scraper import scrape_note
 from services.summarizer import summarize
 
@@ -252,7 +253,11 @@ async def loop():
             cfg = (await read("SELECT is_paused, min_delay_min, max_delay_min, next_scrape_at FROM scheduler_config WHERE id=1"))[0]
             paused, min_d, max_d, next_at = cfg["is_paused"], cfg["min_delay_min"], cfg["max_delay_min"], cfg["next_scrape_at"]
 
-            if not paused:
+            # ponytail: one Chrome on a 2 GB box. _BROWSER_LOCK serializes browser
+            # commands but not memory pressure — notes waking every 30s ate the
+            # community drain's 60s inter-URL sleep, so Chrome never idled and the
+            # OOM killer took the API down. Wait the drain out. Drop on a bigger box.
+            if not paused and not community_ingest.is_running():
                 should = True
                 if next_at:
                     try:
