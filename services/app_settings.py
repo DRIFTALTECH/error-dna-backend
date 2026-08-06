@@ -32,6 +32,11 @@ async def _ensure_table() -> None:
             updated_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
         )"""
     )
+    # Older DBs created app_settings without updated_at — CREATE IF NOT EXISTS won't add it.
+    await write(
+        """ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS updated_at TEXT
+           DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')"""
+    )
     _table_ready = True
 
 
