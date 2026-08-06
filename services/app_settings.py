@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import secrets
 import time
+from datetime import datetime, timezone, timedelta
 
 from db import read, write
 from services.crypto import decrypt, encrypt
 
 KEY_MCP_URL = "mcp_server_url"
 KEY_MCP_BEARER = "mcp_bearer_token"
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 # Short cache so MCP middleware doesn't hit Aurora on every SSE chunk.
 _cache: dict[str, tuple[float, str | None]] = {}
@@ -21,9 +24,10 @@ async def _ensure_table() -> None:
     global _table_ready
     if _table_ready:
         return
+    # Quote "key" — unquoted KEY can bite on some Postgres setups.
     await write(
         """CREATE TABLE IF NOT EXISTS app_settings (
-            key TEXT PRIMARY KEY,
+            "key" TEXT PRIMARY KEY,
             value TEXT NOT NULL,
             updated_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
         )"""
@@ -52,12 +56,16 @@ def invalidate_cache(*keys: str) -> None:
         _cache.pop(k, None)
 
 
+def _now_ist() -> str:
+    return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+
+
 async def get_setting(key: str) -> str | None:
     cached = _cache_get(key)
     if cached is not _MISS:
         return cached  # type: ignore[return-value]
     await _ensure_table()
-    rows = await read("SELECT value FROM app_settings WHERE key = ?", (key,))
+    rows = await read('SELECT value FROM app_settings WHERE "key" = ?', (key,))
     val = rows[0]["value"] if rows else None
     _cache[key] = (time.monotonic(), val)
     return val
@@ -65,12 +73,14 @@ async def get_setting(key: str) -> str | None:
 
 async def set_setting(key: str, value: str) -> None:
     await _ensure_table()
+    # RETURNING so asyncpg.fetch always gets a result set (INSERT/UPDATE alone can 500).
     await write(
-        """INSERT INTO app_settings(key, value, updated_at)
-           VALUES(?, ?, datetime('now','localtime'))
-           ON CONFLICT (key) DO UPDATE
-           SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at""",
-        (key, value),
+        """INSERT INTO app_settings("key", value, updated_at)
+           VALUES(?, ?, ?)
+           ON CONFLICT ("key") DO UPDATE
+           SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at
+           RETURNING "key" """,
+        (key, value, _now_ist()),
     )
     invalidate_cache(key)
 

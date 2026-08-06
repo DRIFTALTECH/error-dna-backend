@@ -1,11 +1,14 @@
 """Developer settings — MCP server URL + bearer token (required for MCP access)."""
 
+import logging
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from config import MCP_PUBLIC_URL
 from services import app_settings as settings
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/developer", tags=["developer"])
 
 
@@ -24,8 +27,12 @@ class McpSettingsIn(BaseModel):
 
 @router.get("/mcp", response_model=McpSettingsOut)
 async def get_mcp_settings():
-    url = (await settings.get_mcp_server_url()) or MCP_PUBLIC_URL
-    bearer = await settings.get_mcp_bearer()
+    try:
+        url = (await settings.get_mcp_server_url()) or MCP_PUBLIC_URL
+        bearer = await settings.get_mcp_bearer()
+    except Exception as e:
+        logger.exception("GET /developer/mcp failed")
+        raise HTTPException(500, f"Failed to load MCP settings: {e}") from e
     return McpSettingsOut(
         mcp_server_url=url or "",
         bearer_token=bearer,
@@ -41,16 +48,19 @@ async def get_mcp_settings():
 
 @router.put("/mcp", response_model=McpSettingsOut)
 async def put_mcp_settings(body: McpSettingsIn):
-    if body.mcp_server_url is not None:
-        await settings.set_mcp_server_url(body.mcp_server_url)
+    try:
+        if body.mcp_server_url is not None:
+            await settings.set_mcp_server_url(body.mcp_server_url)
 
-    if body.regenerate_bearer:
-        token = settings.new_bearer_token()
-        await settings.set_mcp_bearer(token)
-    elif body.bearer_token is not None:
-        try:
+        if body.regenerate_bearer:
+            token = settings.new_bearer_token()
+            await settings.set_mcp_bearer(token)
+        elif body.bearer_token is not None:
             await settings.set_mcp_bearer(body.bearer_token)
-        except ValueError as e:
-            raise HTTPException(400, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        logger.exception("PUT /developer/mcp failed")
+        raise HTTPException(500, f"Failed to save MCP settings: {e}") from e
 
     return await get_mcp_settings()
