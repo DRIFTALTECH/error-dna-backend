@@ -108,6 +108,39 @@ async def rotate_account():
     return {"active_account": active or "—", "ok": True}
 
 
+@router.get("/embeddings")
+async def embeddings_status():
+    """Counts + live progress for the notes embedding backfill job."""
+    from services import embed_backfill
+    counts = await embed_backfill.counts()
+    return {**counts, **embed_backfill.status()}
+
+
+@router.post("/embeddings/backfill")
+async def embeddings_backfill():
+    """Embed every latest note missing a vector — one by one in the background."""
+    from services import embed_backfill
+    counts = await embed_backfill.counts()
+    if counts["missing"] == 0:
+        return {
+            "started": False,
+            "already_running": False,
+            "missing": 0,
+            "message": "All notes already have embeddings",
+        }
+    started = embed_backfill.start()
+    return {
+        "started": started,
+        "already_running": not started,
+        "missing": counts["missing"],
+        "message": (
+            f"Backfilling {counts['missing']} note(s)…"
+            if started
+            else "Backfill already running"
+        ),
+    }
+
+
 def _account_from_trace(trace) -> str | None:
     """Pull 'Assigned <label>' from the account phase of a stored trace."""
     if not isinstance(trace, list):
