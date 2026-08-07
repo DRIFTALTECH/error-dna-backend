@@ -24,10 +24,35 @@ OAUTH_TOKEN_TTL = int(os.getenv("OAUTH_TOKEN_TTL", "3600"))
 
 # Error diagnose — distinct-error vector match threshold (0–1).
 ERROR_MATCH_THRESHOLD = float(os.getenv("ERROR_MATCH_THRESHOLD", "0.70"))
+# Vector candidates when matching raw/generalized text to distinct_errors.
+ERROR_VECTOR_SEARCH_LIMIT = int(os.getenv("ERROR_VECTOR_SEARCH_LIMIT", "5"))
 # Semantic solution notes returned per diagnose (no family filter).
 ERROR_SOLUTION_LIMIT = int(os.getenv("ERROR_SOLUTION_LIMIT", "10"))
-# Informational run lines — skip semantic note search.
-INFORMATIONAL_FAMILY_CODE = "RUN_DIAGNOSTIC_EVENT"
+# Informational run lines — skip semantic note search + fallback.
+INFORMATIONAL_FAMILY_CODE = os.getenv("INFORMATIONAL_FAMILY_CODE", "RUN_DIAGNOSTIC_EVENT")
+
+# Hybrid search — vector + keyword blend for SAP note solutions.
+HYBRID_VECTOR_WEIGHT = float(os.getenv("HYBRID_VECTOR_WEIGHT", "0.7"))
+HYBRID_KEYWORD_WEIGHT = float(os.getenv("HYBRID_KEYWORD_WEIGHT", "0.3"))
+HYBRID_CANDIDATE_LIMIT = int(os.getenv("HYBRID_CANDIDATE_LIMIT", "20"))
+HYBRID_SEARCH_DEFAULT_LIMIT = int(os.getenv("HYBRID_SEARCH_DEFAULT_LIMIT", "5"))
+HYBRID_SEARCH_MAX_LIMIT = int(os.getenv("HYBRID_SEARCH_MAX_LIMIT", "20"))
+HYBRID_KEYWORD_SCORE_TITLE = float(os.getenv("HYBRID_KEYWORD_SCORE_TITLE", "1.0"))
+HYBRID_KEYWORD_SCORE_ISSUE = float(os.getenv("HYBRID_KEYWORD_SCORE_ISSUE", "0.85"))
+HYBRID_KEYWORD_SCORE_TAGS = float(os.getenv("HYBRID_KEYWORD_SCORE_TAGS", "0.75"))
+HYBRID_KEYWORD_SCORE_SUMMARY = float(os.getenv("HYBRID_KEYWORD_SCORE_SUMMARY", "0.55"))
+HYBRID_KEYWORD_TOKEN_MIN_LEN = int(os.getenv("HYBRID_KEYWORD_TOKEN_MIN_LEN", "3"))
+HYBRID_KEYWORD_TOKEN_SCORE = float(os.getenv("HYBRID_KEYWORD_TOKEN_SCORE", "0.4"))
+
+# LLM — error generalize (distinct cluster creation).
+ERROR_GENERALIZE_TEMPERATURE = float(os.getenv("ERROR_GENERALIZE_TEMPERATURE", "0.2"))
+ERROR_GENERALIZE_MAX_TOKENS = int(os.getenv("ERROR_GENERALIZE_MAX_TOKENS", "16384"))
+ERROR_GENERALIZE_TIMEOUT = float(os.getenv("ERROR_GENERALIZE_TIMEOUT", "60"))
+
+# LLM — ZHC fallback when hybrid_search returns zero solutions.
+ERROR_FALLBACK_TEMPERATURE = float(os.getenv("ERROR_FALLBACK_TEMPERATURE", "0.2"))
+ERROR_FALLBACK_MAX_TOKENS = int(os.getenv("ERROR_FALLBACK_MAX_TOKENS", "8192"))
+ERROR_FALLBACK_TIMEOUT = float(os.getenv("ERROR_FALLBACK_TIMEOUT", "120"))
 
 # Reversible encryption for stored SAP account passwords (Fernet key derived from this).
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")

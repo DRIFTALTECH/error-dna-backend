@@ -7,16 +7,25 @@ import asyncio
 import logging
 import re
 
+from config import (
+    HYBRID_CANDIDATE_LIMIT,
+    HYBRID_KEYWORD_SCORE_ISSUE,
+    HYBRID_KEYWORD_SCORE_SUMMARY,
+    HYBRID_KEYWORD_SCORE_TAGS,
+    HYBRID_KEYWORD_SCORE_TITLE,
+    HYBRID_KEYWORD_TOKEN_MIN_LEN,
+    HYBRID_KEYWORD_TOKEN_SCORE,
+    HYBRID_KEYWORD_WEIGHT,
+    HYBRID_SEARCH_DEFAULT_LIMIT,
+    HYBRID_SEARCH_MAX_LIMIT,
+    HYBRID_VECTOR_WEIGHT,
+)
 from db import read
 from routes.community import _resolve_images
 from routes.summaries import _summary_to_ui
 from services.embeddings import _vec_literal, embed_text
 
 logger = logging.getLogger(__name__)
-
-VECTOR_WEIGHT = 0.7
-KEYWORD_WEIGHT = 0.3
-CANDIDATE_LIMIT = 20  # per leg, before blend
 
 
 def _keyword_score(query: str, row: dict) -> float:
@@ -30,19 +39,18 @@ def _keyword_score(query: str, row: dict) -> float:
     summary = (row.get("summary") or "").lower()
     score = 0.0
     if q in title:
-        score = max(score, 1.0)
+        score = max(score, HYBRID_KEYWORD_SCORE_TITLE)
     if q in issue:
-        score = max(score, 0.85)
+        score = max(score, HYBRID_KEYWORD_SCORE_ISSUE)
     if q in tags:
-        score = max(score, 0.75)
+        score = max(score, HYBRID_KEYWORD_SCORE_TAGS)
     if q in summary:
-        score = max(score, 0.55)
-    # Also score on individual tokens (≥3 chars) for multi-word queries.
-    tokens = [t for t in re.split(r"\W+", q) if len(t) >= 3]
+        score = max(score, HYBRID_KEYWORD_SCORE_SUMMARY)
+    tokens = [t for t in re.split(r"\W+", q) if len(t) >= HYBRID_KEYWORD_TOKEN_MIN_LEN]
     if tokens and score < 1.0:
         blob = f"{title} {issue} {tags} {summary}"
         hits = sum(1 for t in tokens if t in blob)
-        score = max(score, 0.4 * (hits / len(tokens)))
+        score = max(score, HYBRID_KEYWORD_TOKEN_SCORE * (hits / len(tokens)))
     return min(1.0, score)
 
 
@@ -126,20 +134,22 @@ async def _load_summary(source: str, summary_id: int) -> dict | None:
     return ui
 
 
-async def handle(query: str, limit: int = 5) -> list[dict]:
+async def handle(query: str, limit: int | None = None) -> list[dict]:
     """Top `limit` hits: full summary + images + match_percent. No source field."""
     q = (query or "").strip()
     if not q:
         return []
-    limit = max(1, min(int(limit), 20))
+    if limit is None:
+        limit = HYBRID_SEARCH_DEFAULT_LIMIT
+    limit = max(1, min(int(limit), HYBRID_SEARCH_MAX_LIMIT))
 
     try:
-        vector_hits = await _vector_hits(q, CANDIDATE_LIMIT)
+        vector_hits = await _vector_hits(q, HYBRID_CANDIDATE_LIMIT)
     except Exception as e:
         logger.warning(f"vector search failed, keyword-only: {e}")
         vector_hits = []
 
-    keyword_hits = await _keyword_hits(q, CANDIDATE_LIMIT)
+    keyword_hits = await _keyword_hits(q, HYBRID_CANDIDATE_LIMIT)
 
     merged: dict[tuple, dict] = {}
     for h in vector_hits:
@@ -166,7 +176,7 @@ async def handle(query: str, limit: int = 5) -> list[dict]:
     for m in merged.values():
         v, k = m["vector_score"], m["keyword_score"]
         if v > 0 and k > 0:
-            score = VECTOR_WEIGHT * v + KEYWORD_WEIGHT * k
+            score = HYBRID_VECTOR_WEIGHT * v + HYBRID_KEYWORD_WEIGHT * k
         elif v > 0:
             score = v
         else:

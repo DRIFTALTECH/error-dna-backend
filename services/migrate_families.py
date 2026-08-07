@@ -21,6 +21,9 @@ from services.error_families import catalog_for_llm, valid_codes
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 
+def _out(msg: str) -> None:
+    print(msg, flush=True)
+
 _SYSTEM = """You classify integration knowledge-base articles into exactly ONE error family code.
 
 The old family label (e.g. "Authentication", "Connection") is often too broad — ignore it when a
@@ -38,8 +41,9 @@ Output ONLY valid JSON:
 
 No markdown, no code fences."""
 
-_RETRIES = 8
-_DELAY_SEC = 1.0
+_RETRIES = 6
+_DELAY_SEC = 0.35
+_CONCURRENCY = 3
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
@@ -83,7 +87,7 @@ async def _classify_note(client: httpx.AsyncClient, system: str, row: dict) -> d
             )
             if resp.status_code in _RETRYABLE_STATUS:
                 wait = min(30, 2 ** attempt)
-                print(f"    retry {attempt + 1}/{_RETRIES} HTTP {resp.status_code}, wait {wait}s")
+                print(f"    retry {attempt + 1}/{_RETRIES} HTTP {resp.status_code}, wait {wait}s", flush=True)
                 await asyncio.sleep(wait)
                 continue
             resp.raise_for_status()
@@ -96,7 +100,7 @@ async def _classify_note(client: httpx.AsyncClient, system: str, row: dict) -> d
             last_err = e
             wait = min(20, 1.5 * (attempt + 1))
             if attempt < _RETRIES - 1:
-                print(f"    retry {attempt + 1}/{_RETRIES}: {e}, wait {wait:.0f}s")
+                print(f"    retry {attempt + 1}/{_RETRIES}: {e}, wait {wait:.0f}s", flush=True)
             await asyncio.sleep(wait)
     raise last_err or RuntimeError("classify failed")
 
@@ -126,7 +130,7 @@ async def _apply_one(
            VALUES (?,?,?,?,?,?)""",
         (row["id"], row.get("source_id"), old, code, conf, reason),
     )
-    print(f"  #{row['id']} {row.get('source_id')} {old!r} → {code} ({conf:.0f}%)")
+    _out(f"  #{row['id']} {row.get('source_id')} {old!r} → {code} ({conf:.0f}%)")
 
 
 async def migrate_all() -> dict:
@@ -144,7 +148,7 @@ async def migrate_all() -> dict:
     todo = [r for r in rows if (r.get("family") or "").strip() not in codes]
     skipped = len(rows) - len(todo)
 
-    print(f"📋 {len(rows)} latest summaries — {skipped} already on new codes, {len(todo)} to migrate")
+    _out(f"📋 {len(rows)} latest summaries — {skipped} already on new codes, {len(todo)} to migrate")
 
     if not todo:
         return {"total": len(rows), "skipped": skipped, "updated": 0, "failed": 0}
@@ -152,33 +156,39 @@ async def migrate_all() -> dict:
     updated = 0
     failed: list[dict] = []
     now = datetime.now(IST).isoformat()
+    sem = asyncio.Semaphore(_CONCURRENCY)
 
     async with httpx.AsyncClient(timeout=120.0) as client:
-        for i, row in enumerate(todo, 1):
-            print(f"[{i}/{len(todo)}]", end=" ")
-            try:
-                await _apply_one(client, system, codes, row, now)
-                updated += 1
-            except Exception as e:
-                failed.append(row)
-                print(f"  #{row['id']} FAILED: {e}")
-            await asyncio.sleep(_DELAY_SEC)
+
+        async def one(row: dict, idx: int) -> None:
+            nonlocal updated
+            async with sem:
+                _out(f"[{idx}/{len(todo)}] #{row['id']} …")
+                try:
+                    await _apply_one(client, system, codes, row, now)
+                    updated += 1
+                except Exception as e:
+                    failed.append(row)
+                    _out(f"  #{row['id']} FAILED: {e}")
+                await asyncio.sleep(_DELAY_SEC)
+
+        await asyncio.gather(*[one(r, i + 1) for i, r in enumerate(todo)])
 
         if failed:
-            print(f"\n🔁 Second pass for {len(failed)} failed notes...")
+            _out(f"\n🔁 Second pass for {len(failed)} failed notes (sequential)...")
             still_failed: list[dict] = []
             for i, row in enumerate(failed, 1):
-                print(f"[retry {i}/{len(failed)}]", end=" ")
+                _out(f"[retry {i}/{len(failed)}] #{row['id']} …")
                 try:
                     await _apply_one(client, system, codes, row, now)
                     updated += 1
                 except Exception as e:
                     still_failed.append(row)
-                    print(f"  #{row['id']} FAILED: {e}")
-                await asyncio.sleep(_DELAY_SEC * 2)
+                    _out(f"  #{row['id']} FAILED: {e}")
+                await asyncio.sleep(1.0)
             failed = still_failed
 
-    print(f"\n✅ Done — updated {updated}, skipped {skipped}, failed {len(failed)}")
+    _out(f"\n✅ Done — updated {updated}, skipped {skipped}, failed {len(failed)}")
     return {"total": len(rows), "skipped": skipped, "updated": updated, "failed": len(failed)}
 
 

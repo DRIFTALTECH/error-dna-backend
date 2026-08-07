@@ -4,6 +4,7 @@ from typing import Annotated
 from pydantic import Field
 from mcp.server.fastmcp import FastMCP
 
+from config import HYBRID_SEARCH_DEFAULT_LIMIT, HYBRID_SEARCH_MAX_LIMIT
 from mcp_server.tools.hybrid_search.handler import handle
 
 
@@ -16,8 +17,9 @@ def register(mcp: FastMCP) -> None:
                         "Use a distinctive phrase (e.g. 'SSL handshake failure', 'HTTP 415 OAuth2'), "
                         "not a huge raw dump if you can trim it.")],
         limit: Annotated[int, Field(
-            ge=1, le=20,
-            description="Max hits to return (1-20). Default 5.")] = 5,
+            ge=1, le=HYBRID_SEARCH_MAX_LIMIT,
+            description=f"Max hits to return (1-{HYBRID_SEARCH_MAX_LIMIT}). "
+                        f"Default {HYBRID_SEARCH_DEFAULT_LIMIT}.")] = HYBRID_SEARCH_DEFAULT_LIMIT,
     ) -> list[dict]:
         """Hybrid search the knowledge base — top matches with full summaries.
 

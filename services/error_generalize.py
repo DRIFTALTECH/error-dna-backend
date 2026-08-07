@@ -6,7 +6,14 @@ import re
 
 import httpx
 
-from config import LLM_API_KEY, LLM_API_URL, LLM_MODEL
+from config import (
+    ERROR_GENERALIZE_MAX_TOKENS,
+    ERROR_GENERALIZE_TEMPERATURE,
+    ERROR_GENERALIZE_TIMEOUT,
+    LLM_API_KEY,
+    LLM_API_URL,
+    LLM_MODEL,
+)
 from services.error_families import catalog_for_llm, classify_text, valid_codes
 
 logger = logging.getLogger(__name__)
@@ -54,7 +61,7 @@ async def generalize_error(raw_text: str) -> dict:
     catalog = await catalog_for_llm()
     system = _SYSTEM_BASE.format(family_catalog=catalog)
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=ERROR_GENERALIZE_TIMEOUT) as client:
         resp = await client.post(
             LLM_API_URL,
             headers={"Authorization": f"Bearer {LLM_API_KEY}"},
@@ -64,8 +71,8 @@ async def generalize_error(raw_text: str) -> dict:
                     {"role": "system", "content": system},
                     {"role": "user", "content": f"Normalize this error:\n\n{text}"},
                 ],
-                "temperature": 0.2,
-                "max_tokens": 16384,
+                "temperature": ERROR_GENERALIZE_TEMPERATURE,
+                "max_tokens": ERROR_GENERALIZE_MAX_TOKENS,
                 "response_format": {"type": "json_object"},
             },
         )

@@ -11,11 +11,13 @@ from config import (
     EMBED_MODEL_ID,
     ERROR_MATCH_THRESHOLD,
     ERROR_SOLUTION_LIMIT,
+    ERROR_VECTOR_SEARCH_LIMIT,
     INFORMATIONAL_FAMILY_CODE,
 )
 from db import read, write
 from mcp_server.tools.hybrid_search.handler import handle as hybrid_search
 from services.embeddings import content_hash, embed_text, _vec_literal
+from services.error_fallback import generate_fallback_solution
 from services.error_generalize import generalize_error
 
 logger = logging.getLogger(__name__)
@@ -33,7 +35,9 @@ def _distinct_blob(title: str, generalized: str, summary: str | None) -> str:
     return "\n\n".join(parts)
 
 
-async def _vector_search(text: str, limit: int = 5) -> list[dict]:
+async def _vector_search(text: str, limit: int | None = None) -> list[dict]:
+    if limit is None:
+        limit = ERROR_VECTOR_SEARCH_LIMIT
     emb = await asyncio.to_thread(embed_text, text)
     vec = _vec_literal(emb)
     rows = await read(
@@ -173,10 +177,26 @@ async def diagnose(raw_error: str, caller: str | None = None, source: str | None
     informational = family_code == INFORMATIONAL_FAMILY_CODE
 
     solutions: list[dict] = []
+    fallback_solution: str | None = None
+    solution_source = "none"
+
     if not informational:
         query = generalized or distinct_row.get("title") or raw
         solutions = await hybrid_search(query=query, limit=ERROR_SOLUTION_LIMIT)
-        await _persist_cluster_solutions(distinct_row["id"], solutions)
+        if solutions:
+            solution_source = "knowledge_base"
+            await _persist_cluster_solutions(distinct_row["id"], solutions)
+        else:
+            fallback_solution = await generate_fallback_solution(
+                raw,
+                generalized=generalized,
+                title=distinct_row.get("title") or "",
+                family_name=family_name or "",
+                family_code=family_code,
+                source=source,
+            )
+            if fallback_solution:
+                solution_source = "llm_fallback"
 
     await write(
         """INSERT INTO error_events
@@ -209,4 +229,6 @@ async def diagnose(raw_error: str, caller: str | None = None, source: str | None
         "error_match_percent": match_percent,
         "occurrence_count": distinct_row.get("occurrence_count", 1),
         "solutions": solutions,
+        "fallback_solution": fallback_solution,
+        "solution_source": solution_source,
     }
