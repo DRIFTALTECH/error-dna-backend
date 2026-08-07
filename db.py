@@ -304,6 +304,39 @@ FIX_SEQUENCES = """
 SELECT setval(pg_get_serial_sequence('scheduler_config','id'), GREATEST((SELECT COALESCE(MAX(id),1) FROM scheduler_config), 1));
 """
 
+OAUTH_CLIENTS_DDL = """
+CREATE TABLE oauth_clients (
+    id SERIAL PRIMARY KEY,
+    client_id TEXT UNIQUE NOT NULL,
+    secret_hash TEXT NOT NULL,
+    name TEXT NOT NULL,
+    is_active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
+);
+"""
+
+
+async def _migrate_oauth_clients(conn) -> None:
+    """Replace legacy oauth_clients (client_id, data, created_at) with current schema."""
+    row = await conn.fetchrow(
+        """SELECT
+             EXISTS(
+               SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'oauth_clients' AND column_name = 'data'
+             ) AS legacy,
+             EXISTS(
+               SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'oauth_clients' AND column_name = 'secret_hash'
+             ) AS current_schema"""
+    )
+    if row["current_schema"]:
+        return
+    if row["legacy"]:
+        await conn.execute("DROP TABLE IF EXISTS oauth_clients CASCADE")
+        print("🔄 oauth_clients: dropped legacy table (client_id, data, created_at)")
+    await conn.execute(OAUTH_CLIENTS_DDL)
+    print("✅ oauth_clients table ready")
+
 
 async def init_db():
     """Create schema + seed rows (idempotent). Uses private connect — DDL only."""
@@ -312,6 +345,7 @@ async def init_db():
         # pgvector — required before summary_embeddings (vector column type).
         await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
         await conn.execute(SCHEMA)
+        await _migrate_oauth_clients(conn)
         # Added after scrape_log shipped — store the full per-run step trace as JSON.
         await conn.execute("ALTER TABLE scrape_log ADD COLUMN IF NOT EXISTS trace TEXT;")
         # Which SAP credential ran this scrape (not the current active account).
