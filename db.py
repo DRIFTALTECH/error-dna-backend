@@ -292,6 +292,29 @@ CREATE TABLE IF NOT EXISTS error_events (
     source TEXT,
     created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
 );
+
+-- Persisted semantic links: distinct error cluster → solution note (summaries.id).
+CREATE TABLE IF NOT EXISTS error_cluster_solutions (
+    id SERIAL PRIMARY KEY,
+    distinct_error_id INTEGER NOT NULL REFERENCES distinct_errors(id) ON DELETE CASCADE,
+    summary_id INTEGER NOT NULL REFERENCES summaries(id) ON DELETE CASCADE,
+    match_percent REAL NOT NULL,
+    hit_count INTEGER DEFAULT 1,
+    last_seen_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS'),
+    UNIQUE (distinct_error_id, summary_id)
+);
+
+-- One-shot family re-tag audit (services/migrate_families.py).
+CREATE TABLE IF NOT EXISTS family_migration_log (
+    id SERIAL PRIMARY KEY,
+    summary_id INTEGER NOT NULL,
+    source_id TEXT,
+    old_family TEXT,
+    new_family TEXT NOT NULL,
+    confidence REAL,
+    reason TEXT,
+    migrated_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
+);
 """
 
 SCHEDULER_SEED = """

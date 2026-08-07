@@ -7,7 +7,12 @@ import hashlib
 import logging
 from datetime import datetime, timezone, timedelta
 
-from config import EMBED_MODEL_ID, ERROR_MATCH_THRESHOLD
+from config import (
+    EMBED_MODEL_ID,
+    ERROR_MATCH_THRESHOLD,
+    ERROR_SOLUTION_LIMIT,
+    INFORMATIONAL_FAMILY_CODE,
+)
 from db import read, write
 from mcp_server.tools.hybrid_search.handler import handle as hybrid_search
 from services.embeddings import content_hash, embed_text, _vec_literal
@@ -108,6 +113,28 @@ async def _family_name(code: str | None) -> str | None:
     return await family_display_name(code)
 
 
+async def _persist_cluster_solutions(distinct_id: int, solutions: list[dict]) -> None:
+    """Upsert semantic note links for graph + future diagnoses."""
+    if not solutions:
+        return
+    now = datetime.now(IST).isoformat()
+    for sol in solutions:
+        sid = sol.get("id")
+        if not sid:
+            continue
+        pct = float(sol.get("match_percent") or 0)
+        await write(
+            """INSERT INTO error_cluster_solutions
+               (distinct_error_id, summary_id, match_percent, last_seen_at)
+               VALUES (?,?,?,?)
+               ON CONFLICT (distinct_error_id, summary_id) DO UPDATE SET
+                 match_percent = EXCLUDED.match_percent,
+                 hit_count = error_cluster_solutions.hit_count + 1,
+                 last_seen_at = EXCLUDED.last_seen_at""",
+            (distinct_id, sid, pct, now),
+        )
+
+
 async def diagnose(raw_error: str, caller: str | None = None, source: str | None = None) -> dict:
     raw = (raw_error or "").strip()
     if not raw:
@@ -143,9 +170,13 @@ async def diagnose(raw_error: str, caller: str | None = None, source: str | None
 
     family_code = distinct_row.get("family_code") or "UNCLASSIFIED_ERROR"
     family_name = await _family_name(family_code)
+    informational = family_code == INFORMATIONAL_FAMILY_CODE
 
-    query = generalized or distinct_row.get("title") or raw
-    solutions = await hybrid_search(query=query, limit=5)
+    solutions: list[dict] = []
+    if not informational:
+        query = generalized or distinct_row.get("title") or raw
+        solutions = await hybrid_search(query=query, limit=ERROR_SOLUTION_LIMIT)
+        await _persist_cluster_solutions(distinct_row["id"], solutions)
 
     await write(
         """INSERT INTO error_events
@@ -173,6 +204,8 @@ async def diagnose(raw_error: str, caller: str | None = None, source: str | None
         "family_name": family_name,
         "distinct_error_id": distinct_row["id"],
         "is_new_distinct": created_new,
+        "informational": informational,
+        "cluster_confidence": match_percent,
         "error_match_percent": match_percent,
         "occurrence_count": distinct_row.get("occurrence_count", 1),
         "solutions": solutions,

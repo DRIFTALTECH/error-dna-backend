@@ -24,6 +24,10 @@ OAUTH_TOKEN_TTL = int(os.getenv("OAUTH_TOKEN_TTL", "3600"))
 
 # Error diagnose — distinct-error vector match threshold (0–1).
 ERROR_MATCH_THRESHOLD = float(os.getenv("ERROR_MATCH_THRESHOLD", "0.70"))
+# Semantic solution notes returned per diagnose (no family filter).
+ERROR_SOLUTION_LIMIT = int(os.getenv("ERROR_SOLUTION_LIMIT", "10"))
+# Informational run lines — skip semantic note search.
+INFORMATIONAL_FAMILY_CODE = "RUN_DIAGNOSTIC_EVENT"
 
 # Reversible encryption for stored SAP account passwords (Fernet key derived from this).
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")
