@@ -50,8 +50,8 @@ def _b64d(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
-def make_token(username: str) -> str:
-    payload = {"sub": username, "exp": int(time.time()) + AUTH_TOKEN_TTL}
+def make_token(sub: str, ttl: int | None = None, kind: str = "user") -> str:
+    payload = {"sub": sub, "exp": int(time.time()) + (ttl or AUTH_TOKEN_TTL), "kind": kind}
     body = _b64(json.dumps(payload, separators=(",", ":")).encode())
     sig = hmac.new(JWT_SECRET.encode(), body.encode(), hashlib.sha256).digest()
     return f"{body}.{_b64(sig)}"

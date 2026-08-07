@@ -56,7 +56,7 @@ def content_hash(blob: str) -> str:
 def embed_text(text: str) -> list[float]:
     """Call Titan Text Embeddings V2 → list of EMBED_DIMENSIONS floats."""
     body = json.dumps({
-        "inputText": text[:50000],  # Titan hard cap ~50k chars
+        "inputText": text,
         "dimensions": EMBED_DIMENSIONS,
         "normalize": True,
     })
@@ -138,5 +138,5 @@ async def embed_summary_safe(source: str, summary_id: int, source_id: str, row: 
             "ok": False,
             "action": "failed",
             "message": "Embedding not saved",
-            "detail": str(e)[:300],
+            "detail": str(e),
         }

@@ -78,14 +78,17 @@ CREATE TABLE IF NOT EXISTS summaries (
 
 
 -- -----------------------------------------------------------------------------
--- Error family taxonomy (seeded)
--- -----------------------------------------------------------------------------
+-- Error family taxonomy (23 families from data/error_families.csv)
 CREATE TABLE IF NOT EXISTS error_families (
-    id            SERIAL PRIMARY KEY,
-    family_name   TEXT UNIQUE NOT NULL,
-    description   TEXT,
-    color         TEXT,
-    icon          TEXT
+    id              SERIAL PRIMARY KEY,
+    code            TEXT UNIQUE,
+    family_name     TEXT NOT NULL,
+    severity        TEXT,
+    description     TEXT,
+    match_patterns  TEXT DEFAULT '[]',
+    match_priority  INTEGER DEFAULT 999000,
+    color           TEXT,
+    icon            TEXT
 );
 
 
@@ -248,22 +251,58 @@ CREATE TABLE IF NOT EXISTS app_settings (
 );
 
 
+-- OAuth 2.0 client_credentials (machine clients). secret_hash = pbkdf2; plaintext shown once at create.
+CREATE TABLE IF NOT EXISTS oauth_clients (
+    id              SERIAL PRIMARY KEY,
+    client_id       TEXT UNIQUE NOT NULL,
+    secret_hash     TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    is_active       INTEGER DEFAULT 1,
+    created_at      TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
+);
+
+
+-- Runtime errors — distinct generalized fingerprints + Titan vectors + audit log
+CREATE TABLE IF NOT EXISTS distinct_errors (
+    id              SERIAL PRIMARY KEY,
+    fingerprint_hash TEXT UNIQUE NOT NULL,
+    title           TEXT NOT NULL,
+    generalized_text TEXT NOT NULL,
+    summary         TEXT,
+    family_code     TEXT DEFAULT 'UNCLASSIFIED_ERROR',
+    occurrence_count INTEGER DEFAULT 1,
+    first_seen_at   TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS'),
+    last_seen_at    TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
+);
+
+CREATE TABLE IF NOT EXISTS distinct_error_embeddings (
+    id              SERIAL PRIMARY KEY,
+    distinct_error_id INTEGER UNIQUE NOT NULL REFERENCES distinct_errors(id) ON DELETE CASCADE,
+    content_hash    TEXT NOT NULL,
+    embedding       vector(1024) NOT NULL,
+    model           TEXT NOT NULL,
+    created_at      TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS'),
+    updated_at      TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
+);
+
+CREATE TABLE IF NOT EXISTS error_events (
+    id              SERIAL PRIMARY KEY,
+    raw_text        TEXT NOT NULL,
+    generalized_text TEXT,
+    distinct_error_id INTEGER REFERENCES distinct_errors(id),
+    family_code     TEXT,
+    error_match_percent REAL,
+    created_new     INTEGER DEFAULT 0,
+    caller          TEXT,
+    source          TEXT,
+    created_at      TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
+);
+
+
 -- =============================================================================
 -- Seed data
 -- =============================================================================
-
-INSERT INTO error_families (id, family_name, description, color, icon) VALUES
-(1,  'HTTP & Status Codes',      'HTTP 4xx, 5xx, redirect errors',       '#58a6ff', '🌐'),
-(2,  'Authentication',           'SAML, OAuth, SSO, login, XSUAA',       '#d29922', '🔐'),
-(3,  'Certificate & TLS',        'SSL, certificates, HTTPS, trust',      '#3fb950', '📜'),
-(4,  'Connection',               'SMTP, SFTP, JDBC, timeout',            '#f85149', '🔌'),
-(5,  'Groovy & Script',          'Groovy, JavaScript failures',          '#d4760e', '📝'),
-(6,  'Mapping & Transformation', 'XML, JSON, XSLT, mapping',             '#a371f7', '🔄'),
-(7,  'Messaging',                'JMS, queues, message processing',      '#f778ba', '📨'),
-(8,  'Database',                 'JDBC, SQL, DB connections',            '#8b949e', '🗄️'),
-(9,  'Security',                 'Roles, authorization, XSS',            '#dc2626', '🛡️'),
-(10, 'Configuration',            'Setup, deployment, migration',         '#2563eb', '⚙️')
-ON CONFLICT (id) DO NOTHING;
+-- error_families: loaded from data/error_families.csv on init_db() (23 rows)
 
 INSERT INTO scheduler_config (id, min_delay_min, max_delay_min, is_paused)
 VALUES (1, 5, 60, 1)

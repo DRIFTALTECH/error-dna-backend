@@ -15,6 +15,8 @@ from routes.credentials import router as credentials_router
 from routes.scheduler import router as scheduler_router
 from routes.compat import router as compat_router
 from routes.community import router as community_router
+from routes.oauth import router as oauth_router
+from routes.errors import router as errors_router
 
 
 @asynccontextmanager
@@ -54,6 +56,7 @@ app.add_middleware(
 # Open routes — no token needed.
 app.include_router(health_router)   # health checks / load balancers
 app.include_router(auth_router)     # POST /api/auth/login
+app.include_router(oauth_router)    # POST /api/oauth/token (open); clients CRUD auth-gated in route
 from routes.images import router as images_router
 from routes.files import router as files_router
 app.include_router(images_router)   # /api/community/images/<key> — <img> can't send a token
@@ -69,6 +72,7 @@ app.include_router(compat_router, dependencies=_auth)  # /api/families — front
 app.include_router(community_router, dependencies=_auth)  # /api/community/* — SAP Community
 from routes.developer import router as developer_router
 app.include_router(developer_router, dependencies=_auth)  # /api/developer/* — MCP bearer + URL
+app.include_router(errors_router, dependencies=_auth)  # POST /api/errors/diagnose — Bearer required
 
 
 if __name__ == "__main__":

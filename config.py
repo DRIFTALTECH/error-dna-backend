@@ -19,6 +19,11 @@ AWS_REGION = os.getenv("AWS_REGION", "ap-south-2")
 # Auth (app login). JWT_SECRET signs the session token; TTL in seconds (default 7d).
 JWT_SECRET = os.getenv("JWT_SECRET", "")
 AUTH_TOKEN_TTL = int(os.getenv("AUTH_TOKEN_TTL", str(7 * 24 * 3600)))
+# OAuth client_credentials access tokens (default 1h).
+OAUTH_TOKEN_TTL = int(os.getenv("OAUTH_TOKEN_TTL", "3600"))
+
+# Error diagnose — distinct-error vector match threshold (0–1).
+ERROR_MATCH_THRESHOLD = float(os.getenv("ERROR_MATCH_THRESHOLD", "0.70"))
 
 # Reversible encryption for stored SAP account passwords (Fernet key derived from this).
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")

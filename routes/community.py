@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from db import read, write
 from models import PaginatedResponse
 from routes.summaries import _summary_to_ui, _embedding_status
+from services.error_families import FAMILY_JOIN
 from services import community_ingest
 
 router = APIRouter(prefix="/api/community", tags=["community"])
@@ -200,10 +201,10 @@ async def dashboard():
            FROM community_summaries WHERE is_latest=1 ORDER BY created_at DESC LIMIT 12"""
     )
     families = await read(
-        """SELECT f.family_name, f.color, COUNT(s.id) as count
+        f"""SELECT f.code, f.family_name, f.color, COUNT(s.id) as count
            FROM error_families f
-           LEFT JOIN community_summaries s ON s.family = f.family_name AND s.is_latest = 1
-           GROUP BY f.family_name, f.color ORDER BY count DESC"""
+           LEFT JOIN community_summaries s ON s.is_latest = 1 AND (s.family = f.code OR s.family = f.family_name)
+           GROUP BY f.code, f.family_name, f.color ORDER BY count DESC"""
     )
     return {
         "total_urls": total, "completed": completed, "pending": pending, "failed": failed,

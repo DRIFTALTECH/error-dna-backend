@@ -5,6 +5,7 @@ from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel, Field
 from db import read
 from models import DashboardResponse, PaginatedResponse
+from services.error_families import FAMILY_JOIN
 
 router = APIRouter(prefix="/api", tags=["summaries"])
 
@@ -118,10 +119,10 @@ async def dashboard():
            FROM summaries WHERE is_latest=1 ORDER BY created_at DESC LIMIT 12"""
     )
     families = await read(
-        """SELECT f.family_name, f.color, COUNT(s.id) as count
+        f"""SELECT f.code, f.family_name, f.color, COUNT(s.id) as count
            FROM error_families f
-           LEFT JOIN summaries s ON s.family = f.family_name AND s.is_latest = 1
-           GROUP BY f.family_name, f.color ORDER BY count DESC"""
+           LEFT JOIN summaries s ON s.is_latest = 1 AND {FAMILY_JOIN}
+           GROUP BY f.code, f.family_name, f.color ORDER BY count DESC"""
     )
     return DashboardResponse(
         total_urls=total, completed=completed, pending=pending,
@@ -164,10 +165,10 @@ async def list_summaries(
 @router.get("/summaries/stats")
 async def summary_stats():
     family_stats = await read(
-        """SELECT f.family_name, f.color, f.icon, COUNT(s.id) as count
+        f"""SELECT f.code, f.family_name, f.color, f.icon, COUNT(s.id) as count
            FROM error_families f
-           LEFT JOIN summaries s ON s.family = f.family_name AND s.is_latest = 1
-           GROUP BY f.family_name, f.color, f.icon ORDER BY count DESC"""
+           LEFT JOIN summaries s ON s.is_latest = 1 AND {FAMILY_JOIN}
+           GROUP BY f.code, f.family_name, f.color, f.icon ORDER BY count DESC"""
     )
     type_stats = await read(
         """SELECT type, COUNT(*) as count FROM summaries

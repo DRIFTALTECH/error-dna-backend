@@ -7,7 +7,7 @@ from config import LLM_API_KEY, LLM_API_URL, LLM_MODEL
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are a senior technical writer for a knowledge base. Your job is to take raw extraction from a technical support article and rewrite it into a clean, vendor-neutral knowledge base entry.
+SYSTEM_PROMPT_BASE = """You are a senior technical writer for a knowledge base. Your job is to take raw extraction from a technical support article and rewrite it into a clean, vendor-neutral knowledge base entry.
 
 CRITICAL RULES:
 1. IGNORE page navigation, breadcrumbs, UI labels, and chrome. Only read the BODY content.
@@ -20,24 +20,28 @@ CRITICAL RULES:
 8. Keep the title concise, under 80 characters.
 9. Extracting is MORE IMPORTANT than sanitizing — get the content right before stripping branding.
 
-CLASSIFY into ONE of these error families:
-"HTTP & Status Codes", "Authentication", "Certificate & TLS", "Connection",
-"Groovy & Script", "Mapping & Transformation", "Messaging", "Database",
-"Security", "Configuration"
+CLASSIFY into ONE error family CODE from this catalog (set "family" to the code exactly, e.g. OAUTH_TOKEN_REQUEST_FAILED):
+{family_catalog}
 
 OUTPUT only valid JSON with these keys:
 - title: Clean title from the article (strip note numbers and SAP, keep the meaning)
-- family: ONE error family from the list above
-- area: Same as family
+- family: ONE family CODE from the catalog above (not the display name)
+- area: Same as family code
 - type: "Problem" / "How To" / "FAQ" / "Configuration" (based on what the article actually is)
 - issue: String describing 2-3 sentences of what goes wrong or what this addresses (NOT an array, one string with line breaks)
 - summary: Root cause + context explanation in paragraph form. Be thorough — capture the actual technical details.
-- steps: JSON array of { "title": "Step name", "details": ["detail 1", "detail 2"] }
+- steps: JSON array of {{ "title": "Step name", "details": ["detail 1", "detail 2"] }}
 - gotchas: JSON array of warning strings like ["Warning 1", "Warning 2"] — real technical gotchas from the article
 - tags: JSON array of 5-10 search keywords
 - environment: JSON array like ["Cloud Integration", "BTP"]
 
 Output ONLY the JSON. No markdown, no explanation, no code fences."""
+
+
+async def _system_prompt() -> str:
+    from services.error_families import catalog_for_llm
+    catalog = await catalog_for_llm()
+    return SYSTEM_PROMPT_BASE.format(family_catalog=catalog or "- UNCLASSIFIED_ERROR: fallback")
 
 
 def build_user_prompt(raw_text: str) -> str:
@@ -100,10 +104,11 @@ async def summarize(raw_text: str, images: list = None, allow_skip: bool = False
     sys_extra, user_extra = _image_directive(images or [])
     if allow_skip:
         sys_extra += _SKIP_DIRECTIVE
+    system = await _system_prompt()
     payload = {
         "model": LLM_MODEL,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT + sys_extra},
+            {"role": "system", "content": system + sys_extra},
             {"role": "user", "content": build_user_prompt(raw_text) + user_extra},
         ],
         "temperature": 0.3,
@@ -146,11 +151,21 @@ async def summarize(raw_text: str, images: list = None, allow_skip: bool = False
         tags = summary.get("tags", [])
         environment = summary.get("environment", [])
 
+        # Normalize family to a catalog code when possible
+        from services.error_families import classify_text, code_from_family_field, valid_codes
+        fam = (summary.get("family") or "").strip()
+        codes = await valid_codes()
+        if fam not in codes:
+            mapped = await code_from_family_field(fam)
+            fam = mapped or await classify_text(f"{summary.get('issue','')} {summary.get('summary','')}") or "UNCLASSIFIED_ERROR"
+        if fam not in codes:
+            fam = "UNCLASSIFIED_ERROR"
+
         return {
             "is_solution": True,
             "title": summary.get("title", ""),
-            "family": summary.get("family", ""),
-            "area": summary.get("area", summary.get("family", "")),
+            "family": fam,
+            "area": fam,
             "type": summary.get("type", "Problem"),
             "issue": summary.get("issue", ""),
             "summary": summary.get("summary", ""),

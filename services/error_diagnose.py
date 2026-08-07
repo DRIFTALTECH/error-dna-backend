@@ -1,0 +1,179 @@
+"""Error diagnose chain — RAG-first distinct errors, then solution notes."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import logging
+from datetime import datetime, timezone, timedelta
+
+from config import EMBED_MODEL_ID, ERROR_MATCH_THRESHOLD
+from db import read, write
+from mcp_server.tools.hybrid_search.handler import handle as hybrid_search
+from services.embeddings import content_hash, embed_text, _vec_literal
+from services.error_generalize import generalize_error
+
+logger = logging.getLogger(__name__)
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _fingerprint(text: str) -> str:
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+
+
+def _distinct_blob(title: str, generalized: str, summary: str | None) -> str:
+    parts = [f"TITLE: {title}", f"GENERALIZED: {generalized}"]
+    if summary:
+        parts.append(f"SUMMARY: {summary}")
+    return "\n\n".join(parts)
+
+
+async def _vector_search(text: str, limit: int = 5) -> list[dict]:
+    emb = await asyncio.to_thread(embed_text, text)
+    vec = _vec_literal(emb)
+    rows = await read(
+        """SELECT de.id, de.title, de.generalized_text, de.summary, de.family_code,
+                  de.occurrence_count,
+                  (1 - (dee.embedding <=> ?::vector)) AS similarity
+           FROM distinct_error_embeddings dee
+           JOIN distinct_errors de ON de.id = dee.distinct_error_id
+           ORDER BY dee.embedding <=> ?::vector
+           LIMIT ?""",
+        (vec, vec, limit),
+    )
+    out = []
+    for r in rows:
+        sim = max(0.0, min(1.0, float(r["similarity"] or 0)))
+        out.append({**dict(r), "similarity": sim})
+    return out
+
+
+def _best_match(hits: list[dict]) -> dict | None:
+    if not hits:
+        return None
+    best = hits[0]
+    if best["similarity"] >= ERROR_MATCH_THRESHOLD:
+        return best
+    return None
+
+
+async def _touch_distinct(distinct_id: int) -> dict:
+    now = datetime.now(IST).isoformat()
+    rows = await write(
+        """UPDATE distinct_errors
+           SET occurrence_count = occurrence_count + 1, last_seen_at = ?
+           WHERE id = ? RETURNING *""",
+        (now, distinct_id),
+    )
+    return rows[0]
+
+
+async def _create_distinct(
+    title: str,
+    generalized: str,
+    family_code: str,
+    summary: str | None = None,
+) -> tuple[dict, bool]:
+    """Insert distinct + embedding. Returns (row, created_new)."""
+    fp = _fingerprint(generalized)
+    existing = await read("SELECT * FROM distinct_errors WHERE fingerprint_hash = ?", (fp,))
+    if existing:
+        row = await _touch_distinct(existing[0]["id"])
+        return row, False
+
+    now = datetime.now(IST).isoformat()
+    rows = await write(
+        """INSERT INTO distinct_errors
+           (fingerprint_hash, title, generalized_text, summary, family_code,
+            occurrence_count, first_seen_at, last_seen_at)
+           VALUES (?,?,?,?,?,1,?,?) RETURNING *""",
+        (fp, title, generalized, summary, family_code, now, now),
+    )
+    row = rows[0]
+    blob = _distinct_blob(title, generalized, summary)
+    digest = content_hash(blob)
+    emb = await asyncio.to_thread(embed_text, blob)
+    vec = _vec_literal(emb)
+    await write(
+        """INSERT INTO distinct_error_embeddings
+           (distinct_error_id, content_hash, embedding, model, created_at, updated_at)
+           VALUES (?,?,?::vector,?,?,?)""",
+        (row["id"], digest, vec, EMBED_MODEL_ID, now, now),
+    )
+    return row, True
+
+
+async def _family_name(code: str | None) -> str | None:
+    from services.error_families import family_display_name
+    return await family_display_name(code)
+
+
+async def diagnose(raw_error: str, caller: str | None = None, source: str | None = None) -> dict:
+    raw = (raw_error or "").strip()
+    if not raw:
+        raise ValueError("error_text is required")
+
+    created_new = False
+    match_percent = 0.0
+    distinct_row: dict | None = None
+    generalized = raw
+    gen: dict | None = None
+
+    hit = _best_match(await _vector_search(raw))
+
+    if not hit:
+        gen = await generalize_error(raw)
+        generalized = gen["generalized_text"]
+        hit = _best_match(await _vector_search(generalized))
+
+    if hit:
+        distinct_row = await _touch_distinct(hit["id"])
+        generalized = distinct_row["generalized_text"]
+        match_percent = round(hit["similarity"] * 100, 1)
+    else:
+        if gen is None:
+            gen = await generalize_error(raw)
+        generalized = gen["generalized_text"]
+        distinct_row, created_new = await _create_distinct(
+            gen["title"],
+            generalized,
+            gen.get("family_code") or "UNCLASSIFIED_ERROR",
+            gen.get("summary"),
+        )
+
+    family_code = distinct_row.get("family_code") or "UNCLASSIFIED_ERROR"
+    family_name = await _family_name(family_code)
+
+    query = generalized or distinct_row.get("title") or raw
+    solutions = await hybrid_search(query=query, limit=5)
+
+    await write(
+        """INSERT INTO error_events
+           (raw_text, generalized_text, distinct_error_id, family_code,
+            error_match_percent, created_new, caller, source)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            raw,
+            generalized,
+            distinct_row["id"],
+            family_code,
+            match_percent,
+            1 if created_new else 0,
+            caller,
+            source,
+        ),
+    )
+
+    return {
+        "raw_error": raw,
+        "title": distinct_row.get("title") or "",
+        "generalized_error": generalized,
+        "summary": distinct_row.get("summary") or "",
+        "family_code": family_code,
+        "family_name": family_name,
+        "distinct_error_id": distinct_row["id"],
+        "is_new_distinct": created_new,
+        "error_match_percent": match_percent,
+        "occurrence_count": distinct_row.get("occurrence_count", 1),
+        "solutions": solutions,
+    }
