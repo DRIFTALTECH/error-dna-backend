@@ -17,5 +17,15 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+.claude/
+.serena/
+
+# Installers / local artifacts
+*.pkg
+
+# Batch test outputs (scripts removed; keep pattern if re-added)
+data/*.log
+data/*_report.json
+error_signatures
 
 community_urls
