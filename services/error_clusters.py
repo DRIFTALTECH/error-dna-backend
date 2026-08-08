@@ -1,32 +1,53 @@
-"""Error cluster listing + Neo4j-shaped graph for the UI."""
+"""Error cluster listing + embedding-similarity graph for the UI."""
 
 from __future__ import annotations
 
 import math
+import random
+import re
 
+from config import (
+    GRAPH_NOTE_SIMILARITY_THRESHOLD,
+    GRAPH_SIMILAR_K,
+    GRAPH_SIMILARITY_THRESHOLD,
+)
 from db import read
-from services.error_families import code_from_family_field, family_display_name
+from services.error_families import family_display_name
 
-# Default hub colors when family row has none
-_HUB_COLORS = [
-    "#8b5cf6", "#f97316", "#06b6d4", "#22c55e", "#ec4899",
-    "#eab308", "#6366f1", "#14b8a6", "#ef4444", "#a855f7",
-]
+_VEC_RE = re.compile(r"[\[\],\s]+")
 
 
-async def _family_meta() -> dict[str, dict]:
-    rows = await read(
-        "SELECT code, family_name, color, severity FROM error_families WHERE code IS NOT NULL",
-    )
-    out: dict[str, dict] = {}
-    for i, r in enumerate(rows):
-        code = r["code"]
-        out[code] = {
-            "code": code,
-            "label": r.get("family_name") or code,
-            "color": r.get("color") or _HUB_COLORS[i % len(_HUB_COLORS)],
-            "severity": r.get("severity") or "medium",
-        }
+def _parse_vector(raw) -> list[float]:
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [float(x) for x in raw]
+    text = str(raw).strip()
+    if not text:
+        return []
+    parts = [p for p in _VEC_RE.split(text.strip("[]")) if p]
+    return [float(p) for p in parts]
+
+
+def _random_project_2d(vectors: list[list[float]], scale: float = 1100.0) -> list[tuple[float, float]]:
+    if not vectors:
+        return []
+    if len(vectors) == 1:
+        return [(0.0, 0.0)]
+    d = len(vectors[0])
+    rng = random.Random(42)
+
+    def unit() -> list[float]:
+        v = [rng.gauss(0, 1) for _ in range(d)]
+        norm = math.sqrt(sum(x * x for x in v)) or 1.0
+        return [x / norm for x in v]
+
+    ax, ay = unit(), unit()
+    out: list[tuple[float, float]] = []
+    for vec in vectors:
+        x = sum(a * b for a, b in zip(vec, ax)) * scale
+        y = sum(a * b for a, b in zip(vec, ay)) * scale
+        out.append((round(x, 1), round(y, 1)))
     return out
 
 
@@ -108,162 +129,223 @@ async def get_cluster(cluster_id: int) -> dict | None:
     }
 
 
-async def build_graph() -> dict:
-    """Family hubs + clusters + events + solutions — grouped for force-graph UI."""
-    meta = await _family_meta()
-    clusters = await read(
-        """SELECT de.id, de.title, de.family_code, de.occurrence_count
-           FROM distinct_errors de ORDER BY de.family_code, de.id""",
+async def _cluster_similar_pairs(threshold: float, top_k: int) -> list[dict]:
+    rows = await read(
+        """WITH ranked AS (
+               SELECT a.distinct_error_id AS source_id,
+                      b.distinct_error_id AS target_id,
+                      (1 - (a.embedding <=> b.embedding)) AS similarity,
+                      ROW_NUMBER() OVER (
+                          PARTITION BY a.distinct_error_id
+                          ORDER BY a.embedding <=> b.embedding
+                      ) AS rn
+               FROM distinct_error_embeddings a
+               JOIN distinct_error_embeddings b
+                 ON a.distinct_error_id <> b.distinct_error_id
+               WHERE (1 - (a.embedding <=> b.embedding)) >= ?
+           )
+           SELECT source_id, target_id, similarity
+           FROM ranked
+           WHERE rn <= ?
+           ORDER BY similarity DESC""",
+        (threshold, top_k),
     )
+    return [dict(r) for r in rows]
 
-    active_families: list[str] = []
-    seen_fc: set[str] = set()
-    for c in clusters:
-        fc = c.get("family_code") or "UNCLASSIFIED_ERROR"
-        if fc not in seen_fc:
-            seen_fc.add(fc)
-            active_families.append(fc)
 
-    # Hub positions on a ring — each family gets its own territory
-    groups: list[dict] = []
-    hub_xy: dict[str, dict] = {}
-    n = max(len(active_families), 1)
-    for i, fcode in enumerate(active_families):
-        angle = (2 * math.pi * i / n) - (math.pi / 2)
-        radius = 420
-        x = round(math.cos(angle) * radius, 1)
-        y = round(math.sin(angle) * radius, 1)
-        fm = meta.get(fcode, {})
-        groups.append({
-            "family_code": fcode,
-            "label": fm.get("label") or fcode,
-            "color": fm.get("color") or _HUB_COLORS[i % len(_HUB_COLORS)],
-            "x": x,
-            "y": y,
-            "cluster_count": sum(1 for c in clusters if (c.get("family_code") or "UNCLASSIFIED_ERROR") == fcode),
-        })
-        hub_xy[fcode] = {"x": x, "y": y, "color": groups[-1]["color"]}
+async def _note_similar_pairs(note_ids: list[int], threshold: float) -> list[dict]:
+    if len(note_ids) < 2:
+        return []
+    placeholders = ",".join("?" * len(note_ids))
+    rows = await read(
+        f"""SELECT a.summary_id AS source_id, b.summary_id AS target_id,
+                   (1 - (a.embedding <=> b.embedding)) AS similarity
+            FROM summary_embeddings a
+            JOIN summary_embeddings b
+              ON a.summary_id < b.summary_id
+             AND a.source = 'notes' AND b.source = 'notes'
+            WHERE a.summary_id IN ({placeholders})
+              AND b.summary_id IN ({placeholders})
+              AND (1 - (a.embedding <=> b.embedding)) >= ?
+            ORDER BY similarity DESC""",
+        (*note_ids, *note_ids, threshold),
+    )
+    return [dict(r) for r in rows]
+
+
+async def build_graph(
+    min_similarity: float | None = None,
+    similar_k: int | None = None,
+) -> dict:
+    """Embedding-driven cluster graph — SIMILAR edges from distinct_error_embeddings."""
+    threshold = min_similarity if min_similarity is not None else GRAPH_SIMILARITY_THRESHOLD
+    top_k = similar_k if similar_k is not None else GRAPH_SIMILAR_K
+    threshold = max(0.0, min(1.0, threshold))
+    top_k = max(1, min(top_k, 20))
+
+    cluster_rows = await read(
+        """SELECT de.id, de.title, de.generalized_text, de.family_code, de.occurrence_count,
+                  dee.embedding::text AS embedding
+           FROM distinct_errors de
+           JOIN distinct_error_embeddings dee ON dee.distinct_error_id = de.id
+           ORDER BY de.id""",
+    )
 
     nodes: list[dict] = []
     links: list[dict] = []
     node_ids: set[str] = set()
+    cluster_xy: dict[int, tuple[float, float]] = {}
 
-    for fcode in active_families:
-        fm = meta.get(fcode, {})
-        hub = hub_xy[fcode]
-        nid = f"family:{fcode}"
-        node_ids.add(nid)
-        nodes.append({
-            "id": nid,
-            "label": fm.get("label") or fcode,
-            "type": "Family",
-            "family_code": fcode,
-            "color": hub["color"],
-            "fx": hub["x"],
-            "fy": hub["y"],
-        })
+    valid_rows: list[dict] = []
+    vectors: list[list[float]] = []
+    for r in cluster_rows:
+        vec = _parse_vector(r.get("embedding"))
+        if not vec:
+            continue
+        valid_rows.append(dict(r))
+        vectors.append(vec)
 
-    for c in clusters:
-        fcode = c.get("family_code") or "UNCLASSIFIED_ERROR"
-        hub = hub_xy.get(fcode, {"x": 0, "y": 0, "color": "#64748b"})
-        cid = f"cluster:{c['id']}"
+    coords = _random_project_2d(vectors)
+
+    for r, (x, y) in zip(valid_rows, coords):
+        cid = f"cluster:{r['id']}"
         node_ids.add(cid)
+        cluster_xy[r["id"]] = (x, y)
         nodes.append({
             "id": cid,
-            "label": c.get("title") or f"Cluster {c['id']}",
+            "label": r.get("title") or f"Cluster {r['id']}",
             "type": "Cluster",
-            "cluster_id": c["id"],
-            "family_code": fcode,
-            "color": hub["color"],
-            "occurrence_count": c.get("occurrence_count") or 0,
+            "labels": ["DistinctError"],
+            "cluster_id": r["id"],
+            "family_code": r.get("family_code") or "",
+            "occurrence_count": r.get("occurrence_count") or 0,
+            "x": x,
+            "y": y,
         })
-        links.append({"source": f"family:{fcode}", "target": cid, "type": "HAS_CLUSTER"})
 
-    events = await read(
-        """SELECT id, distinct_error_id, raw_text, error_match_percent
-           FROM error_events ORDER BY created_at DESC LIMIT 150""",
-    )
-    for e in events:
-        cid = f"cluster:{e['distinct_error_id']}"
-        if cid not in node_ids:
+    seen_edges: set[tuple[int, int]] = set()
+    for pair in await _cluster_similar_pairs(threshold, top_k):
+        a, b = int(pair["source_id"]), int(pair["target_id"])
+        key = (min(a, b), max(a, b))
+        if key in seen_edges:
             continue
-        cluster_node = next((n for n in nodes if n["id"] == cid), None)
-        fcode = cluster_node.get("family_code") if cluster_node else "UNCLASSIFIED_ERROR"
-        eid = f"event:{e['id']}"
-        if eid in node_ids:
+        seen_edges.add(key)
+        sa, sb = f"cluster:{a}", f"cluster:{b}"
+        if sa not in node_ids or sb not in node_ids:
             continue
-        node_ids.add(eid)
-        raw = (e.get("raw_text") or "").replace("\n", " ").strip()
-        nodes.append({
-            "id": eid,
-            "label": raw or f"Event {e['id']}",
-            "type": "Event",
-            "event_id": e["id"],
-            "cluster_id": e["distinct_error_id"],
-            "family_code": fcode,
-            "color": hub_xy.get(fcode, {}).get("color", "#94a3b8"),
-            "match_percent": e.get("error_match_percent"),
-        })
+        sim = max(0.0, min(1.0, float(pair["similarity"] or 0)))
         links.append({
-            "source": eid,
-            "target": cid,
-            "type": "MATCHED",
-            "match_percent": e.get("error_match_percent"),
+            "source": sa,
+            "target": sb,
+            "type": "SIMILAR",
+            "match_percent": round(sim * 100, 1),
         })
 
-    sols = await read(
+    sol_rows = await read(
         """SELECT ecs.distinct_error_id, ecs.summary_id, ecs.match_percent,
-                  s.title, s.source_id, s.family AS note_family,
-                  de.family_code AS cluster_family
+                  s.title, s.source_id AS note_number
            FROM error_cluster_solutions ecs
            JOIN summaries s ON s.id = ecs.summary_id
-           JOIN distinct_errors de ON de.id = ecs.distinct_error_id
            ORDER BY ecs.match_percent DESC""",
     )
-    note_family_cache: dict[str, str] = {}
-    for s in sols:
+
+    note_ids: list[int] = []
+    cluster_note_links: list[dict] = []
+    for s in sol_rows:
         cid = f"cluster:{s['distinct_error_id']}"
         if cid not in node_ids:
             continue
-        cluster_family = s.get("cluster_family") or "UNCLASSIFIED_ERROR"
-        note_fam_raw = (s.get("note_family") or "").strip()
-        if note_fam_raw not in note_family_cache:
-            resolved = await code_from_family_field(note_fam_raw)
-            note_family_cache[note_fam_raw] = resolved or cluster_family
-        note_family = note_family_cache[note_fam_raw]
-        # Visual home: note family if known, else cluster family
-        home_family = note_family if note_family in hub_xy else cluster_family
-
         sid = f"note:{s['summary_id']}"
-        if sid not in node_ids:
-            node_ids.add(sid)
-            hub = hub_xy.get(home_family, hub_xy.get(cluster_family, {"color": "#34d399"}))
-            nodes.append({
-                "id": sid,
-                "label": s.get("title") or f"Note {s.get('source_id')}",
-                "type": "Solution",
-                "summary_id": s["summary_id"],
-                "note_number": s.get("source_id"),
-                "family_code": home_family,
-                "cluster_family": cluster_family,
-                "note_family": note_fam_raw,
-                "color": hub.get("color", "#34d399"),
-                "match_percent": s.get("match_percent"),
-            })
-            # Solution belongs to its catalog family hub
-            fam_nid = f"family:{home_family}"
-            if fam_nid in node_ids:
-                links.append({
-                    "source": fam_nid,
-                    "target": sid,
-                    "type": "IN_FAMILY",
-                })
+        cluster_note_links.append({**dict(s), "cid": cid, "sid": sid})
+        note_ids.append(int(s["summary_id"]))
 
-        links.append({
-            "source": cid,
-            "target": sid,
-            "type": "SUGGESTS",
-            "match_percent": s.get("match_percent"),
+    note_ids_unique = sorted(set(note_ids))
+    note_xy: dict[int, tuple[float, float]] = {}
+
+    for nid in note_ids_unique:
+        sid = f"note:{nid}"
+        related = [l for l in cluster_note_links if l["summary_id"] == nid]
+        xs, ys, wsum = 0.0, 0.0, 0.0
+        for l in related:
+            xy = cluster_xy.get(int(l["distinct_error_id"]))
+            if not xy:
+                continue
+            w = max(float(l.get("match_percent") or 1), 1.0)
+            xs += xy[0] * w
+            ys += xy[1] * w
+            wsum += w
+        if wsum > 0:
+            angle = (nid % 360) * (math.pi / 180)
+            note_xy[nid] = (
+                round(xs / wsum + math.cos(angle) * 180, 1),
+                round(ys / wsum + math.sin(angle) * 180, 1),
+            )
+
+    for nid, (x, y) in note_xy.items():
+        sid = f"note:{nid}"
+        if sid in node_ids:
+            continue
+        row = next((l for l in cluster_note_links if l["summary_id"] == nid), None)
+        if not row:
+            continue
+        node_ids.add(sid)
+        nodes.append({
+            "id": sid,
+            "label": row.get("title") or f"Note {row.get('note_number')}",
+            "type": "Solution",
+            "labels": ["SolutionNote"],
+            "summary_id": nid,
+            "note_number": row.get("note_number"),
+            "x": x,
+            "y": y,
         })
 
-    return {"nodes": nodes, "links": links, "groups": groups}
+    for l in cluster_note_links:
+        if l["sid"] not in node_ids:
+            continue
+        links.append({
+            "source": l["cid"],
+            "target": l["sid"],
+            "type": "SUGGESTS",
+            "match_percent": l.get("match_percent"),
+        })
+
+    for pair in await _note_similar_pairs(note_ids_unique, GRAPH_NOTE_SIMILARITY_THRESHOLD):
+        sa, sb = f"note:{pair['source_id']}", f"note:{pair['target_id']}"
+        if sa not in node_ids or sb not in node_ids:
+            continue
+        sim = max(0.0, min(1.0, float(pair["similarity"] or 0)))
+        links.append({
+            "source": sa,
+            "target": sb,
+            "type": "NOTE_SIMILAR",
+            "match_percent": round(sim * 100, 1),
+        })
+
+    relationships: list[dict] = []
+    for i, lnk in enumerate(links):
+        relationships.append({
+            "elementId": f"rel:{i}",
+            "type": lnk["type"],
+            "startNode": lnk["source"],
+            "endNode": lnk["target"],
+            "properties": {
+                k: v for k, v in lnk.items()
+                if k not in ("source", "target", "type") and v is not None
+            },
+        })
+
+    return {
+        "nodes": nodes,
+        "links": links,
+        "relationships": relationships,
+        "meta": {
+            "format": "neo4j",
+            "layout": "embedding-force",
+            "similarity_threshold": threshold,
+            "similar_k": top_k,
+            "cluster_count": sum(1 for n in nodes if n["type"] == "Cluster"),
+            "solution_count": sum(1 for n in nodes if n["type"] == "Solution"),
+            "similar_edge_count": sum(1 for l in links if l["type"] == "SIMILAR"),
+        },
+    }

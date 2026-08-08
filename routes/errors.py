@@ -28,9 +28,12 @@ async def clusters_list(_: str = Depends(require_auth)):
 
 
 @router.get("/clusters/graph")
-async def clusters_graph(_: str = Depends(require_auth)):
-    """Neo4j-shaped nodes + links for force/graph UI."""
-    return await build_graph()
+async def clusters_graph(
+    min_similarity: float | None = None,
+    _: str = Depends(require_auth),
+):
+    """Embedding-similarity cluster graph — SIMILAR edges from distinct_error_embeddings."""
+    return await build_graph(min_similarity=min_similarity)
 
 
 @router.get("/clusters/{cluster_id}")
