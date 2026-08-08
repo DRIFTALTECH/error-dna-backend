@@ -117,6 +117,68 @@ async def _family_name(code: str | None) -> str | None:
     return await family_display_name(code)
 
 
+def _slim_cautions(gotchas) -> list[str]:
+    out: list[str] = []
+    for g in gotchas or []:
+        if isinstance(g, dict):
+            desc = (g.get("description") or "").strip()
+            name = (g.get("name") or "").strip()
+            if not desc:
+                continue
+            if name and name.lower() != "heads up":
+                out.append(f"{name}: {desc}")
+            else:
+                out.append(desc)
+        else:
+            text = str(g).strip()
+            if text:
+                out.append(text)
+    return out
+
+
+def _slim_solution(hit: dict) -> dict:
+    """Diagnose API — problem / fix / cautions only; no note ids or SAP metadata."""
+    fix = hit.get("how_to_fix")
+    if not isinstance(fix, list):
+        fix = [str(fix)] if fix else []
+    return {
+        "title": hit.get("title") or "",
+        "problem": hit.get("the_problem") or "",
+        "whats_wrong": hit.get("whats_going_on") or "",
+        "solution": [str(s).strip() for s in fix if str(s).strip()],
+        "cautions": _slim_cautions(hit.get("gotchas")),
+        "match_percent": hit.get("match_percent"),
+    }
+
+
+def _diagnose_response(
+    *,
+    distinct_row: dict,
+    generalized: str,
+    family_code: str,
+    family_name: str | None,
+    match_percent: float,
+    informational: bool,
+    solutions: list[dict],
+    fallback_solution: str | None,
+) -> dict:
+    body: dict = {
+        "distinct_error": {
+            "title": distinct_row.get("title") or "",
+            "generalized_error": generalized,
+            "problem": distinct_row.get("summary") or generalized,
+            "family_code": family_code,
+            "family_name": family_name or "",
+            "cluster_confidence": match_percent,
+            "informational": informational,
+        },
+        "solutions": [_slim_solution(s) for s in solutions],
+    }
+    if fallback_solution:
+        body["fallback_solution"] = fallback_solution
+    return body
+
+
 async def _persist_cluster_solutions(distinct_id: int, solutions: list[dict]) -> None:
     """Upsert semantic note links for graph + future diagnoses."""
     if not solutions:
@@ -178,13 +240,11 @@ async def diagnose(raw_error: str, caller: str | None = None, source: str | None
 
     solutions: list[dict] = []
     fallback_solution: str | None = None
-    solution_source = "none"
 
     if not informational:
         query = generalized or distinct_row.get("title") or raw
         solutions = await hybrid_search(query=query, limit=ERROR_SOLUTION_LIMIT)
         if solutions:
-            solution_source = "knowledge_base"
             await _persist_cluster_solutions(distinct_row["id"], solutions)
         else:
             fallback_solution = await generate_fallback_solution(
@@ -195,8 +255,6 @@ async def diagnose(raw_error: str, caller: str | None = None, source: str | None
                 family_code=family_code,
                 source=source,
             )
-            if fallback_solution:
-                solution_source = "llm_fallback"
 
     await write(
         """INSERT INTO error_events
@@ -215,20 +273,13 @@ async def diagnose(raw_error: str, caller: str | None = None, source: str | None
         ),
     )
 
-    return {
-        "raw_error": raw,
-        "title": distinct_row.get("title") or "",
-        "generalized_error": generalized,
-        "summary": distinct_row.get("summary") or "",
-        "family_code": family_code,
-        "family_name": family_name,
-        "distinct_error_id": distinct_row["id"],
-        "is_new_distinct": created_new,
-        "informational": informational,
-        "cluster_confidence": match_percent,
-        "error_match_percent": match_percent,
-        "occurrence_count": distinct_row.get("occurrence_count", 1),
-        "solutions": solutions,
-        "fallback_solution": fallback_solution,
-        "solution_source": solution_source,
-    }
+    return _diagnose_response(
+        distinct_row=distinct_row,
+        generalized=generalized,
+        family_code=family_code,
+        family_name=family_name,
+        match_percent=match_percent,
+        informational=informational,
+        solutions=solutions,
+        fallback_solution=fallback_solution,
+    )

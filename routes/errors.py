@@ -17,7 +17,7 @@ class DiagnoseBody(BaseModel):
 
 @router.post("/diagnose")
 async def diagnose_error(body: DiagnoseBody, caller: str = Depends(require_auth)):
-    """RAG-first error chain. Authorization: Bearer access_token from POST /api/oauth/token."""
+    """RAG-first error chain. Returns distinct error + slim solution notes (no SAP note metadata)."""
     return await diagnose(body.error_text, caller=caller, source=body.source)
 
 
