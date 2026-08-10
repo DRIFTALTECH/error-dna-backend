@@ -15,7 +15,7 @@ import httpx
 
 from config import LLM_API_KEY, LLM_API_URL, LLM_MODEL
 from db import read, write
-from services.error_families import catalog_for_llm, valid_codes
+from services.error_families import catalog_for_llm, classify_text, valid_codes
 
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -27,15 +27,15 @@ _UNCLASSIFIED = "UNCLASSIFIED_ERROR"
 
 _SYSTEM = """You classify SAP integration knowledge-base articles into exactly ONE error family code.
 
-The current family label may be missing, empty, outdated, or too broad — ignore it when a more
-specific code fits the actual failure or problem the article addresses.
+The note is currently unclassified or has a stale label — assign the best-matching SPECIFIC family.
+UNCLASSIFIED_ERROR is NOT in the catalog and must NOT be returned.
 
 Pick family_code from this catalog (exact code string):
 {family_catalog}
 
 Rules:
-- Prefer a specific family over UNCLASSIFIED_ERROR when the article clearly matches one.
-- Only return UNCLASSIFIED_ERROR when nothing in the catalog fits.
+- You MUST pick a specific family from the catalog above.
+- Choose the closest match even if confidence is moderate; only pick when content is completely unrelated.
 - family_code must be an exact catalog code string.
 
 Output ONLY valid JSON:
@@ -54,6 +54,7 @@ _state: dict[str, Any] = {
     "batch_done": 0,
     "updated": 0,
     "unchanged": 0,
+    "skipped": 0,
     "failed": 0,
     "current": None,
     "last_error": None,
@@ -80,13 +81,32 @@ def needs_reclassify(family: str | None, codes: set[str]) -> bool:
 
 
 def _note_blob(row: dict) -> str:
+    raw = (row.get("family") or "").strip()
+    if not raw or raw == _UNCLASSIFIED:
+        current = "(none — pick a specific family from the catalog)"
+    else:
+        current = raw
     parts = [
-        f"CURRENT_FAMILY: {row.get('family') or '(empty)'}",
+        f"CURRENT_FAMILY: {current}",
         f"TITLE: {row.get('title') or ''}",
         f"ISSUE: {row.get('issue') or ''}",
         f"SUMMARY: {row.get('summary') or ''}",
     ]
     return "\n\n".join(parts)
+
+
+def _resolve_code(
+    llm_code: str,
+    assignable: set[str],
+    regex_code: str | None,
+) -> tuple[str, str]:
+    """Pick a specific family code; never return UNCLASSIFIED from reclassify."""
+    code = (llm_code or "").strip()
+    if code in assignable:
+        return code, ""
+    if regex_code and regex_code in assignable:
+        return regex_code, "pattern match"
+    return _UNCLASSIFIED, ""
 
 
 def _parse_llm_json(content: str) -> dict:
@@ -138,6 +158,8 @@ async def _classify_note(client: httpx.AsyncClient, system: str, row: dict) -> d
 
 def _push_recent(entry: dict) -> None:
     recent = _state.get("recent") or []
+    sid = entry.get("id")
+    recent = [r for r in recent if r.get("id") != sid]
     recent.insert(0, entry)
     _state["recent"] = recent[:25]
 
@@ -167,17 +189,36 @@ async def _pending_rows() -> list[dict]:
 async def _apply_one(
     client: httpx.AsyncClient,
     system: str,
-    codes: set[str],
+    assignable: set[str],
     row: dict,
     now: str,
 ) -> dict:
     old = (row.get("family") or "").strip()
+    blob = f"{row.get('issue') or ''} {row.get('summary') or ''}"
+    regex_code = await classify_text(blob)
+
     data = await _classify_note(client, system, row)
-    code = (data.get("family_code") or "").strip()
-    if code not in codes:
-        code = _UNCLASSIFIED
+    code, fallback_note = _resolve_code(
+        data.get("family_code") or "",
+        assignable,
+        regex_code if regex_code != _UNCLASSIFIED else None,
+    )
     conf = float(data.get("confidence") or 0)
     reason = data.get("reason") or ""
+    if fallback_note:
+        reason = f"{reason} ({fallback_note})".strip()
+
+    if code == _UNCLASSIFIED or code not in assignable:
+        return {
+            "id": row["id"],
+            "source_id": row.get("source_id"),
+            "old_family": old or None,
+            "new_family": old or _UNCLASSIFIED,
+            "confidence": conf,
+            "reason": reason,
+            "changed": False,
+            "skipped": True,
+        }
 
     changed = code != old
     if changed:
@@ -200,6 +241,7 @@ async def _apply_one(
         "confidence": conf,
         "reason": reason,
         "changed": changed,
+        "skipped": False,
     }
 
 
@@ -212,7 +254,8 @@ async def _run() -> None:
 
     try:
         codes = await valid_codes()
-        catalog = await catalog_for_llm()
+        assignable = codes - {_UNCLASSIFIED}
+        catalog = await catalog_for_llm(exclude={_UNCLASSIFIED})
         system = _SYSTEM.format(family_catalog=catalog)
         rows = await _pending_rows()
 
@@ -220,6 +263,7 @@ async def _run() -> None:
         _state["batch_done"] = 0
         _state["updated"] = 0
         _state["unchanged"] = 0
+        _state["skipped"] = 0
         _state["failed"] = 0
         _state["current"] = None
         _state["last_error"] = None
@@ -231,19 +275,21 @@ async def _run() -> None:
             for row in rows:
                 _state["current"] = row.get("source_id") or str(row["id"])
                 try:
-                    result = await _apply_one(client, system, codes, row, now)
-                    if result["changed"]:
+                    result = await _apply_one(client, system, assignable, row, now)
+                    if result.get("skipped"):
+                        _state["skipped"] += 1
+                    elif result["changed"]:
                         _state["updated"] += 1
+                        _push_recent({**result, "status": "ok"})
+                        logger.info(
+                            "reclassify #%s %s: %r → %s",
+                            row["id"],
+                            row.get("source_id"),
+                            result["old_family"],
+                            result["new_family"],
+                        )
                     else:
                         _state["unchanged"] += 1
-                    _push_recent({**result, "status": "ok"})
-                    logger.info(
-                        "reclassify #%s %s: %r → %s",
-                        row["id"],
-                        row.get("source_id"),
-                        result["old_family"],
-                        result["new_family"],
-                    )
                 except Exception as e:
                     _state["failed"] += 1
                     _state["last_error"] = str(e)[:300]

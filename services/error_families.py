@@ -100,8 +100,16 @@ async def valid_codes() -> set[str]:
     return _codes_cache
 
 
-async def catalog_for_llm() -> str:
-    """One line per family for LLM prompts."""
+async def catalog_for_llm(exclude: set[str] | None = None) -> str:
+    """One line per family for LLM prompts. Pass exclude to omit codes (e.g. UNCLASSIFIED_ERROR)."""
+    if exclude:
+        rows = await list_families()
+        lines = [
+            f"- {r['code']}: {r['family_name']} — {r.get('description') or ''}"
+            for r in rows
+            if r["code"] not in exclude
+        ]
+        return "\n".join(lines)
     global _catalog_cache
     if _catalog_cache is not None:
         return _catalog_cache
