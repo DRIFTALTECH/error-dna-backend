@@ -178,6 +178,41 @@ async def summary_stats():
     return {"families": family_stats, "types": type_stats}
 
 
+@router.get("/summaries/reclassify")
+async def reclassify_status():
+    """Counts + live progress for the unclassified-notes reclassification job."""
+    from services import reclassify_notes
+    counts = await reclassify_notes.counts()
+    return {**counts, **reclassify_notes.status()}
+
+
+@router.post("/summaries/reclassify/start")
+async def reclassify_start():
+    """Send each unclassified / stale note through LLM family assignment — one by one."""
+    from services import reclassify_notes
+    counts = await reclassify_notes.counts()
+    if counts["pending"] == 0:
+        return {
+            "started": False,
+            "already_running": False,
+            "pending": 0,
+            "message": "All notes are already on valid family codes",
+        }
+    started, err = reclassify_notes.start()
+    if err:
+        raise HTTPException(503, err)
+    return {
+        "started": started,
+        "already_running": not started,
+        "pending": counts["pending"],
+        "message": (
+            f"Reclassifying {counts['pending']} note(s)…"
+            if started
+            else "Reclassification already running"
+        ),
+    }
+
+
 @router.get("/summaries/{summary_id}")
 async def get_summary(summary_id: int):
     rows = await read("SELECT * FROM summaries WHERE id = ?", (summary_id,))

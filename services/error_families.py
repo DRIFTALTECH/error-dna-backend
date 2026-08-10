@@ -38,11 +38,13 @@ async def seed_families() -> int:
     if not CSV_PATH.is_file():
         return 0
     n = 0
+    codes: list[str] = []
     with CSV_PATH.open(newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             code = (row.get("code") or "").strip()
             if not code:
                 continue
+            codes.append(code)
             name = (row.get("name") or code).strip()
             severity = (row.get("severity") or "medium").strip().lower()
             desc = (row.get("description") or "").strip()
@@ -66,6 +68,12 @@ async def seed_families() -> int:
                 (code, name, severity, desc, patterns, priority, color),
             )
             n += 1
+    if codes:
+        placeholders = ",".join("?" * len(codes))
+        await write(
+            f"DELETE FROM error_families WHERE code IS NOT NULL AND code NOT IN ({placeholders})",
+            tuple(codes),
+        )
     global _catalog_cache, _codes_cache
     _catalog_cache = None
     _codes_cache = None
