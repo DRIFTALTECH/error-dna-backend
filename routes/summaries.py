@@ -182,8 +182,7 @@ async def summary_stats():
 async def reclassify_status():
     """Counts + live progress for the unclassified-notes reclassification job."""
     from services import reclassify_notes
-    counts = await reclassify_notes.counts()
-    return {**counts, **reclassify_notes.status()}
+    return {**reclassify_notes.status(), **await reclassify_notes.counts()}
 
 
 @router.post("/summaries/reclassify/start")

@@ -48,10 +48,10 @@ Output ONLY valid JSON:
 No markdown, no code fences."""
 
 _running = False
+# batch_* keys only — never "pending"/"total" (those come from counts() and must not be overwritten).
 _state: dict[str, Any] = {
-    "pending": 0,
-    "total": 0,
-    "done": 0,
+    "batch_total": 0,
+    "batch_done": 0,
     "updated": 0,
     "unchanged": 0,
     "failed": 0,
@@ -216,9 +216,8 @@ async def _run() -> None:
         system = _SYSTEM.format(family_catalog=catalog)
         rows = await _pending_rows()
 
-        _state["pending"] = len(rows)
-        _state["total"] = len(rows)
-        _state["done"] = 0
+        _state["batch_total"] = len(rows)
+        _state["batch_done"] = 0
         _state["updated"] = 0
         _state["unchanged"] = 0
         _state["failed"] = 0
@@ -256,12 +255,10 @@ async def _run() -> None:
                         "error": str(e)[:200],
                     })
                     logger.warning("reclassify #%s failed: %s", row["id"], e)
-                _state["done"] += 1
+                _state["batch_done"] += 1
                 await asyncio.sleep(INTER_ITEM_SLEEP_SEC)
     finally:
         _state["current"] = None
-        counts_now = await counts()
-        _state["pending"] = counts_now["pending"]
         _running = False
 
 
