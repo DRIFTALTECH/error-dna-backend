@@ -243,7 +243,11 @@ async def diagnose(raw_error: str, caller: str | None = None, source: str | None
 
     if not informational:
         query = generalized or distinct_row.get("title") or raw
-        solutions = await hybrid_search(query=query, limit=ERROR_SOLUTION_LIMIT)
+        min_pct = int(ERROR_MATCH_THRESHOLD * 100)
+        solutions = [
+            s for s in await hybrid_search(query=query, limit=ERROR_SOLUTION_LIMIT)
+            if (s.get("match_percent") or 0) >= min_pct
+        ]
         if solutions:
             await _persist_cluster_solutions(distinct_row["id"], solutions)
         else:
