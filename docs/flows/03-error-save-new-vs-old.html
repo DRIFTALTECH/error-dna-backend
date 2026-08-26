@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>03 — Save new vs old errors · Error DNA</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=Outfit:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #0b1210; --paper: #121a17; --panel: #18211d; --line: #2a3a33;
+      --gold: #d4a054; --mint: #7dcea0; --coral: #e07a5f; --sky: #7eb8c9;
+      --text: #e7efe9; --muted: #8fa197; --dim: #5e7268;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: radial-gradient(1000px 480px at 0% 0%, #3a2214 0%, transparent 45%), var(--ink);
+      color: var(--text);
+      font-family: Outfit, system-ui, sans-serif;
+      line-height: 1.55;
+    }
+    a { color: var(--gold); }
+    header.top {
+      position: sticky; top: 0; z-index: 20;
+      display: flex; align-items: center; gap: 18px;
+      padding: 14px 28px;
+      background: rgba(11,18,16,.88);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--line);
+    }
+    .mark { font-family: Fraunces, serif; font-weight: 700; letter-spacing: -.03em; color: var(--gold); }
+    nav.series { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+    nav.series a {
+      text-decoration: none; color: var(--muted);
+      border: 1px solid var(--line); padding: 6px 12px; border-radius: 999px; font-size: 13px;
+    }
+    nav.series a.on { color: var(--ink); background: var(--coral); border-color: var(--coral); }
+    main { max-width: 1080px; margin: 0 auto; padding: 48px 24px 96px; }
+    .kicker { font-family: "IBM Plex Mono", monospace; font-size: 12px; letter-spacing: .18em; text-transform: uppercase; color: var(--coral); }
+    h1 { font-family: Fraunces, serif; font-size: clamp(2.1rem, 5vw, 3.4rem); line-height: 1.08; letter-spacing: -.03em; margin: 8px 0 16px; }
+    .lede { font-size: 1.15rem; color: var(--muted); max-width: 46rem; }
+    h2 { font-family: Fraunces, serif; font-size: 1.7rem; margin: 56px 0 12px; color: var(--gold); }
+    h3 { font-size: 1.05rem; margin: 28px 0 8px; color: var(--sky); }
+    p { color: #d5e0d8; }
+    .callout { border-left: 3px solid var(--gold); background: var(--panel); padding: 16px 20px; margin: 24px 0; }
+    .warn { border-left-color: var(--coral); }
+    .ok { border-left-color: var(--mint); }
+    code, pre { font-family: "IBM Plex Mono", monospace; font-size: 12.5px; }
+    pre { background: #0a0f0d; border: 1px solid var(--line); padding: 16px 18px; overflow-x: auto; border-radius: 8px; color: #c9e6d4; }
+    table { width: 100%; border-collapse: collapse; font-size: .92rem; margin: 16px 0 28px; }
+    th, td { border-bottom: 1px solid var(--line); text-align: left; padding: 10px 8px; vertical-align: top; }
+    th { color: var(--gold); font-weight: 600; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }
+    .tree {
+      display: grid; gap: 12px; margin: 24px 0;
+    }
+    .row { display: grid; grid-template-columns: 160px 1fr; gap: 12px; }
+    .label {
+      font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--gold);
+      padding-top: 14px;
+    }
+    .card {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px;
+    }
+    .card.old { border-color: #3d6b52; }
+    .card.new { border-color: #8a4b32; }
+    .card.always { border-color: #3d5a6b; }
+    .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 800px) { .row, .cols { grid-template-columns: 1fr; } }
+    .pill { display: inline-block; font-family: "IBM Plex Mono", monospace; font-size: 11px; padding: 2px 8px; border-radius: 999px; margin-right: 6px; }
+    .pill.old { background: var(--mint); color: #0b1210; }
+    .pill.new { background: var(--coral); color: #1a0c08; }
+    .pill.evt { background: var(--sky); color: #0b1210; }
+    footer { margin-top: 64px; color: var(--dim); font-size: 13px; border-top: 1px solid var(--line); padding-top: 20px; }
+    ol.tight li { margin-bottom: 8px; }
+    .er { color: var(--coral); }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <div class="mark">Error DNA</div>
+    <nav class="series">
+      <a href="./01-sap-notes-pipeline.html">1 · Notes pipeline</a>
+      <a href="./02-error-embedding-search.html">2 · Error embeddings</a>
+      <a class="on" href="./03-error-save-new-vs-old.html">3 · Save new vs old</a>
+    </nav>
+  </header>
+  <main>
+    <div class="kicker">Briefing 03 of 03 · Persistence</div>
+    <h1>New error vs old error: exactly what is written to the database</h1>
+    <p class="lede">
+      Every diagnose call writes an audit row. An “old” error only increments a counter on an existing cluster.
+      A “new” error inserts a cluster row plus its Titan vector. Solution links are upserted only when hybrid search
+      returned notes above the 70% bar. The pasted raw text is never used as the cluster’s stored identity.
+    </p>
+
+    <div class="callout">
+      <strong>Decision in one line.</strong>
+      Vector similarity ≥ 0.70 (raw or generalized) <em>or</em> SHA-256 of generalized text already exists →
+      <span class="pill old">OLD</span>
+      else →
+      <span class="pill new">NEW</span>.
+      Then always →
+      <span class="pill evt">error_events</span>.
+    </div>
+
+    <h2>Decision tree</h2>
+    <div class="tree">
+      <div class="row">
+        <div class="label">Pass 1 or 2 hit</div>
+        <div class="card old">
+          <strong>OLD via vector.</strong> <code>_touch_distinct(hit.id)</code>.
+          No new embedding. LLM generalize output (if pass 2 ran) is discarded except that we already used its text for the search.
+          Working generalized text is replaced by the <em>cluster’s</em> stored <code>generalized_text</code>.
+        </div>
+      </div>
+      <div class="row">
+        <div class="label">Both passes miss</div>
+        <div class="card">
+          Call <code>_create_distinct(title, generalized, family_code, summary)</code> with the LLM generalize result.
+          First it looks up <code>fingerprint_hash</code>.
+        </div>
+      </div>
+      <div class="row">
+        <div class="label">Fingerprint exists</div>
+        <div class="card old">
+          <strong>OLD via exact hash.</strong> Same <code>_touch_distinct</code>.
+          Happens when two pastes generalize to the identical string but their vectors scored &lt; 0.70 (unusual, but coded).
+          <code>created_new</code> stays false. Title/summary/family from this LLM call are <em>not</em> applied to the row.
+        </div>
+      </div>
+      <div class="row">
+        <div class="label">Fingerprint new</div>
+        <div class="card new">
+          <strong>NEW cluster.</strong> INSERT <code>distinct_errors</code>, then INSERT <code>distinct_error_embeddings</code>.
+          <code>created_new = True</code>. <code>match_percent</code> stays <strong>0.0</strong> (it is never set on this branch).
+        </div>
+      </div>
+      <div class="row">
+        <div class="label">Every request</div>
+        <div class="card always">
+          INSERT <code>error_events</code> with the raw paste, chosen cluster id, family, match percent, created_new flag, caller, source.
+        </div>
+      </div>
+      <div class="row">
+        <div class="label">Notes ≥ 70%</div>
+        <div class="card always">
+          UPSERT <code>error_cluster_solutions</code> (cluster ↔ <code>summaries.id</code>). Feeds the cluster graph.
+          Informational families never reach this. Zero notes → LLM fallback string in the JSON only — not stored as a note.
+        </div>
+      </div>
+    </div>
+
+    <h2>What “old” writes — _touch_distinct</h2>
+    <pre>UPDATE distinct_errors
+   SET occurrence_count = occurrence_count + 1,
+       last_seen_at = ?          -- datetime.now(IST).isoformat()
+ WHERE id = ?
+ RETURNING *</pre>
+    <table>
+      <tr><th>Column</th><th>Updated?</th></tr>
+      <tr><td><code>occurrence_count</code></td><td>Yes, +1</td></tr>
+      <tr><td><code>last_seen_at</code></td><td>Yes, now (IST text)</td></tr>
+      <tr><td><code>title</code>, <code>generalized_text</code>, <code>summary</code>, <code>family_code</code></td><td class="er">No. First-seen wording stays forever.</td></tr>
+      <tr><td><code>first_seen_at</code></td><td class="er">No</td></tr>
+      <tr><td><code>fingerprint_hash</code></td><td class="er">No</td></tr>
+      <tr><td><code>distinct_error_embeddings</code></td><td class="er">Not touched. Vector is frozen at create time.</td></tr>
+    </table>
+    <p>The diagnose JSON’s <code>distinct_error.generalized_error</code> is this stored text, not the new paste, not a new LLM rewrite.</p>
+
+    <h2>What “new” writes — _create_distinct</h2>
+    <h3>1. Fingerprint</h3>
+    <pre>fingerprint_hash = sha256( generalized_text.strip().encode("utf-8") ).hexdigest()</pre>
+    <p>It is a unique key on <code>distinct_errors</code>. Same generalized string cannot create two clusters.</p>
+
+    <h3>2. Cluster row</h3>
+    <pre>INSERT INTO distinct_errors (
+  fingerprint_hash, title, generalized_text, summary, family_code,
+  occurrence_count, first_seen_at, last_seen_at
+) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+RETURNING *</pre>
+    <table>
+      <tr><th>Column</th><th>Source</th></tr>
+      <tr><td><code>title</code></td><td>LLM generalize <code>title</code> (or <code>"Integration error"</code>)</td></tr>
+      <tr><td><code>generalized_text</code></td><td>LLM <code>generalized_text</code> (or regex-cleaned raw if no API key)</td></tr>
+      <tr><td><code>summary</code></td><td>LLM <code>summary</code></td></tr>
+      <tr><td><code>family_code</code></td><td>Regex-first, then LLM catalog code, else <code>UNCLASSIFIED_ERROR</code></td></tr>
+      <tr><td><code>occurrence_count</code></td><td>Always <code>1</code> on insert</td></tr>
+      <tr><td><code>first_seen_at</code> / <code>last_seen_at</code></td><td>Same IST timestamp</td></tr>
+    </table>
+    <p>The raw pasted error is <strong>not</strong> a column on <code>distinct_errors</code>. It only lives on <code>error_events.raw_text</code>.</p>
+
+    <h3>3. Cluster embedding row</h3>
+    <pre>blob = "TITLE: {title}\n\nGENERALIZED: {generalized}\n\nSUMMARY: {summary}"
+content_hash = sha256(blob)
+emb = Titan V2 (1024-dim, normalized)
+vec = "[f0,f1,...]"
+
+INSERT INTO distinct_error_embeddings
+  (distinct_error_id, content_hash, embedding, model, created_at, updated_at)
+VALUES (?, ?, ?::vector, ?, ?, ?)</pre>
+    <p>
+      One-to-one with the cluster (<code>distinct_error_id</code> unique, <code>ON DELETE CASCADE</code>).
+      There is no <code>ON CONFLICT</code> here — create is insert-only.
+    </p>
+
+    <h2>Audit row — always, new or old</h2>
+    <pre>INSERT INTO error_events (
+  raw_text, generalized_text, distinct_error_id, family_code,
+  error_match_percent, created_new, caller, source
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)</pre>
+    <table>
+      <tr><th>Field</th><th>Old cluster</th><th>New cluster</th></tr>
+      <tr><td><code>raw_text</code></td><td colspan="2">The exact stripped paste. Always stored.</td></tr>
+      <tr><td><code>generalized_text</code></td><td>Cluster’s stored generalized text</td><td>This call’s LLM generalized text</td></tr>
+      <tr><td><code>distinct_error_id</code></td><td>Matched id</td><td>Newly inserted id</td></tr>
+      <tr><td><code>family_code</code></td><td>Cluster’s family</td><td>Generalize family</td></tr>
+      <tr><td><code>error_match_percent</code></td><td><code>round(similarity × 100, 1)</code> e.g. 87.3</td><td><strong>0.0</strong> (never assigned on create)</td></tr>
+      <tr><td><code>created_new</code></td><td><code>0</code></td><td><code>1</code></td></tr>
+      <tr><td><code>caller</code></td><td colspan="2">Auth subject from <code>require_auth</code> (username or OAuth client)</td></tr>
+      <tr><td><code>source</code></td><td colspan="2">Optional body field, e.g. <code>"my-integration-system"</code></td></tr>
+    </table>
+    <p><code>created_at</code> on the table defaults to IST via Postgres <code>to_char(now() AT TIME ZONE 'Asia/Kolkata', ...)</code>.</p>
+
+    <h2>Solution links — only when notes matched</h2>
+    <p>For each hybrid-search hit that survived the 70% filter:</p>
+    <pre>INSERT INTO error_cluster_solutions
+  (distinct_error_id, summary_id, match_percent, last_seen_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT (distinct_error_id, summary_id) DO UPDATE SET
+  match_percent = EXCLUDED.match_percent,
+  hit_count = error_cluster_solutions.hit_count + 1,
+  last_seen_at = EXCLUDED.last_seen_at</pre>
+    <ul>
+      <li>Runs for both old and new clusters. First time a note is linked: <code>hit_count</code> defaults to 1. Later diagnoses of the same pair increment it and refresh percent.</li>
+      <li><code>summary_id</code> is the hybrid hit’s <code>id</code>. The FK points at <code>summaries(id)</code> (SAP Notes). Community hits share the same JSON <code>id</code> space but a different table — a community-only id will fail the FK or collide with a note id.</li>
+      <li>The HTTP response then <em>slims</em> solutions (drops note numbers). The graph API still reads this link table.</li>
+      <li>LLM fallback markdown is returned as <code>fallback_solution</code> and is <strong>not inserted</strong> anywhere.</li>
+    </ul>
+
+    <h2>Side-by-side</h2>
+    <div class="cols">
+      <div class="card old">
+        <h3 style="margin-top:0">Old error (seen before)</h3>
+        <ol class="tight">
+          <li>UPDATE <code>distinct_errors</code> count + last_seen</li>
+          <li>INSERT <code>error_events</code> (<code>created_new=0</code>, match % from vector)</li>
+          <li>Maybe UPSERT <code>error_cluster_solutions</code></li>
+        </ol>
+        <p>0 rows added to embedding tables.</p>
+      </div>
+      <div class="card new">
+        <h3 style="margin-top:0">New error (first of its kind)</h3>
+        <ol class="tight">
+          <li>INSERT <code>distinct_errors</code> (count = 1)</li>
+          <li>Titan of TITLE/GENERALIZED/SUMMARY blob</li>
+          <li>INSERT <code>distinct_error_embeddings</code></li>
+          <li>INSERT <code>error_events</code> (<code>created_new=1</code>, match % = 0)</li>
+          <li>Maybe UPSERT <code>error_cluster_solutions</code></li>
+        </ol>
+      </div>
+    </div>
+
+    <h2>Tables involved (and not involved)</h2>
+    <table>
+      <tr><th>Table</th><th>On diagnose</th></tr>
+      <tr><td><code>distinct_errors</code></td><td>UPDATE (old) or INSERT (new)</td></tr>
+      <tr><td><code>distinct_error_embeddings</code></td><td>INSERT only when new</td></tr>
+      <tr><td><code>error_events</code></td><td>INSERT always</td></tr>
+      <tr><td><code>error_cluster_solutions</code></td><td>UPSERT if notes ≥ 70%</td></tr>
+      <tr><td><code>error_families</code></td><td>Read only (display name, regex classify)</td></tr>
+      <tr><td><code>summaries</code> / <code>summary_embeddings</code></td><td>Read only (hybrid search)</td></tr>
+      <tr><td><code>urls</code> / <code>scrape_log</code></td><td>Untouched — those belong to the notes pipeline</td></tr>
+    </table>
+
+    <div class="callout warn">
+      <strong>There is no “raw errors” table of unique pastes.</strong>
+      Duplicates of the same failure collapse into one cluster. History of each paste is <code>error_events</code>.
+      The cluster is the DNA; the event is the occurrence.
+    </div>
+
+    <h2>Response fields that reflect the save</h2>
+    <p>The JSON does not currently expose <code>distinct_error_id</code> / <code>is_new_distinct</code> / <code>occurrence_count</code> even though README documents them. What the API actually returns from <code>_diagnose_response</code>:</p>
+    <table>
+      <tr><th>JSON path</th><th>Old</th><th>New</th></tr>
+      <tr><td><code>distinct_error.title</code></td><td>Stored cluster title</td><td>LLM title just inserted</td></tr>
+      <tr><td><code>distinct_error.generalized_error</code></td><td>Stored generalized</td><td>This call’s generalized</td></tr>
+      <tr><td><code>distinct_error.problem</code></td><td>Stored summary (or generalized)</td><td>LLM summary</td></tr>
+      <tr><td><code>distinct_error.family_code / family_name</code></td><td>Cluster family</td><td>Generalize family</td></tr>
+      <tr><td><code>distinct_error.cluster_confidence</code></td><td>Vector % (e.g. 82.4)</td><td><code>0.0</code></td></tr>
+      <tr><td><code>distinct_error.informational</code></td><td colspan="2">True iff family is <code>RUN_DIAGNOSTIC_EVENT</code></td></tr>
+      <tr><td><code>solutions[]</code></td><td colspan="2">Slim notes, or empty</td></tr>
+      <tr><td><code>fallback_solution</code></td><td colspan="2">Present only when solutions empty and not informational</td></tr>
+    </table>
+    <p>
+      Whether it was new is visible in the DB as <code>error_events.created_new</code> and in logs, not as a top-level response flag.
+      Occurrence count is on <code>distinct_errors.occurrence_count</code> and on cluster list/graph APIs.
+    </p>
+
+    <footer>
+      Sourced from <code>services/error_diagnose.py</code> (<code>_touch_distinct</code>, <code>_create_distinct</code>, <code>_persist_cluster_solutions</code>, <code>diagnose</code>) and <code>db.py</code> schema.
+      Start at <a href="./01-sap-notes-pipeline.html">briefing 01</a> if you need how those solution notes got into <code>summaries</code>.
+    </footer>
+  </main>
+</body>
+</html>

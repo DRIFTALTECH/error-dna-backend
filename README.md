@@ -178,7 +178,7 @@ error-dna-backend/
 ├── prompts.py              # LLM system prompts (ZHC fallback)
 ├── db.py                   # PostgreSQL + migrations
 ├── routes/                 # API endpoints
-│   ├── errors.py           # POST /api/errors/diagnose, cluster graph
+│   ├── errors.py           # POST /api/errors/diagnose
 │   ├── oauth.py            # OAuth client_credentials
 │   ├── summaries.py        # SAP Note summaries
 │   ├── community.py        # SAP Community summaries
@@ -187,7 +187,6 @@ error-dna-backend/
 │   ├── error_diagnose.py   # Main diagnose chain
 │   ├── error_generalize.py # LLM error normalization
 │   ├── error_fallback.py   # LLM fallback when no notes match
-│   ├── error_clusters.py   # Cluster list + graph API
 │   ├── error_families.py   # Family catalog + pattern classifier
 │   ├── embeddings.py       # Titan vector embeddings
 │   ├── summarizer.py       # Note summarization LLM
@@ -264,30 +263,6 @@ After code changes on the server:
 ```bash
 git pull && sudo systemctl restart error-dna-api
 ```
-
----
-
-## Cluster graph UI
-
-The frontend `/clusters` page shows a force-directed graph of error clusters grouped by family territory.
-
-![Error DNA cluster graph — families, errors, and SAP Note solution links](image.png)
-
-**What you see in the graph:**
-
-| Color | Node type |
-|---|---|
-| Purple | **Family** — broad error category (e.g. HTTP Request Failed) |
-| Red | **Error cluster** — one distinct error pattern we've seen before |
-| Green | **Solution note** — SAP Note fix linked by semantic search |
-
-Click a family to filter the graph. Click an error cluster to see its linked SAP Notes in the sidebar. Zoom with scroll or the +/- controls.
-
-**API endpoints behind this page:**
-
-- `GET /api/errors/clusters` — table list
-- `GET /api/errors/clusters/graph` — nodes + links for the graph
-- `GET /api/errors/clusters/{id}` — single cluster detail with linked SAP Notes
 
 ---
 

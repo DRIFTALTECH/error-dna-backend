@@ -179,28 +179,6 @@ def _diagnose_response(
     return body
 
 
-async def _persist_cluster_solutions(distinct_id: int, solutions: list[dict]) -> None:
-    """Upsert semantic note links for graph + future diagnoses."""
-    if not solutions:
-        return
-    now = datetime.now(IST).isoformat()
-    for sol in solutions:
-        sid = sol.get("id")
-        if not sid:
-            continue
-        pct = float(sol.get("match_percent") or 0)
-        await write(
-            """INSERT INTO error_cluster_solutions
-               (distinct_error_id, summary_id, match_percent, last_seen_at)
-               VALUES (?,?,?,?)
-               ON CONFLICT (distinct_error_id, summary_id) DO UPDATE SET
-                 match_percent = EXCLUDED.match_percent,
-                 hit_count = error_cluster_solutions.hit_count + 1,
-                 last_seen_at = EXCLUDED.last_seen_at""",
-            (distinct_id, sid, pct, now),
-        )
-
-
 async def diagnose(raw_error: str, caller: str | None = None, source: str | None = None) -> dict:
     raw = (raw_error or "").strip()
     if not raw:
@@ -248,9 +226,7 @@ async def diagnose(raw_error: str, caller: str | None = None, source: str | None
             s for s in await hybrid_search(query=query, limit=ERROR_SOLUTION_LIMIT)
             if (s.get("match_percent") or 0) >= min_pct
         ]
-        if solutions:
-            await _persist_cluster_solutions(distinct_row["id"], solutions)
-        else:
+        if not solutions:
             fallback_solution = await generate_fallback_solution(
                 raw,
                 generalized=generalized,

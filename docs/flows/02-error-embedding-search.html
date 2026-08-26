@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>02 — Error embedding search · Error DNA</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=Outfit:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #0b1210; --paper: #121a17; --panel: #18211d; --line: #2a3a33;
+      --gold: #d4a054; --mint: #7dcea0; --coral: #e07a5f; --sky: #7eb8c9;
+      --text: #e7efe9; --muted: #8fa197; --dim: #5e7268;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: radial-gradient(1100px 520px at 90% -20%, #1a2c40 0%, transparent 50%), var(--ink);
+      color: var(--text);
+      font-family: Outfit, system-ui, sans-serif;
+      line-height: 1.55;
+    }
+    a { color: var(--sky); }
+    header.top {
+      position: sticky; top: 0; z-index: 20;
+      display: flex; align-items: center; gap: 18px;
+      padding: 14px 28px;
+      background: rgba(11,18,16,.88);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--line);
+    }
+    .mark { font-family: Fraunces, serif; font-weight: 700; letter-spacing: -.03em; color: var(--gold); }
+    nav.series { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+    nav.series a {
+      text-decoration: none; color: var(--muted);
+      border: 1px solid var(--line); padding: 6px 12px; border-radius: 999px; font-size: 13px;
+    }
+    nav.series a.on { color: var(--ink); background: var(--sky); border-color: var(--sky); }
+    main { max-width: 1080px; margin: 0 auto; padding: 48px 24px 96px; }
+    .kicker { font-family: "IBM Plex Mono", monospace; font-size: 12px; letter-spacing: .18em; text-transform: uppercase; color: var(--sky); }
+    h1 { font-family: Fraunces, serif; font-size: clamp(2.1rem, 5vw, 3.4rem); line-height: 1.08; letter-spacing: -.03em; margin: 8px 0 16px; }
+    .lede { font-size: 1.15rem; color: var(--muted); max-width: 46rem; }
+    h2 { font-family: Fraunces, serif; font-size: 1.7rem; margin: 56px 0 12px; color: var(--gold); }
+    h3 { font-size: 1.05rem; margin: 28px 0 8px; color: var(--sky); }
+    p { color: #d5e0d8; }
+    .callout { border-left: 3px solid var(--sky); background: var(--panel); padding: 16px 20px; margin: 24px 0; }
+    .warn { border-left-color: var(--coral); }
+    .gold { border-left-color: var(--gold); }
+    .ok { border-left-color: var(--mint); }
+    code, pre { font-family: "IBM Plex Mono", monospace; font-size: 12.5px; }
+    pre { background: #0a0f0d; border: 1px solid var(--line); padding: 16px 18px; overflow-x: auto; border-radius: 8px; color: #c9e6d4; }
+    table { width: 100%; border-collapse: collapse; font-size: .92rem; margin: 16px 0 28px; }
+    th, td { border-bottom: 1px solid var(--line); text-align: left; padding: 10px 8px; vertical-align: top; }
+    th { color: var(--gold); font-weight: 600; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }
+    .step {
+      display: grid; grid-template-columns: 72px 1fr; gap: 16px;
+      margin: 0; padding: 18px 0; border-bottom: 1px solid var(--line);
+    }
+    .step .num {
+      font-family: Fraunces, serif; font-size: 1.8rem; color: var(--sky); line-height: 1;
+    }
+    .badge { display: inline-block; font-family: "IBM Plex Mono", monospace; font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--sky); color: #0b1210; }
+    .badge.gold { background: var(--gold); }
+    .badge.mint { background: var(--mint); }
+    .badge.coral { background: var(--coral); color: #1a0c08; }
+    .diagram {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 22px 18px;
+      margin: 24px 0 32px;
+      overflow-x: auto;
+    }
+    .lane { display: flex; align-items: stretch; gap: 8px; min-width: 860px; }
+    .box {
+      flex: 1; background: #0f1613; border: 1px solid var(--line); border-radius: 10px;
+      padding: 12px; font-size: 13px;
+    }
+    .box h4 { margin: 0 0 6px; font-size: 13px; color: var(--gold); }
+    .arrow { align-self: center; color: var(--sky); font-size: 22px; flex: 0 0 18px; }
+    .branch {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; min-width: 860px;
+    }
+    .yes { border-color: #3d6b52; }
+    .no { border-color: #6b3d3d; }
+    ol.tight li { margin-bottom: 10px; }
+    footer { margin-top: 64px; color: var(--dim); font-size: 13px; border-top: 1px solid var(--line); padding-top: 20px; }
+    @media (max-width: 800px) { .step { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <div class="mark">Error DNA</div>
+    <nav class="series">
+      <a href="./01-sap-notes-pipeline.html">1 · Notes pipeline</a>
+      <a class="on" href="./02-error-embedding-search.html">2 · Error embeddings</a>
+      <a href="./03-error-save-new-vs-old.html">3 · Save new vs old</a>
+    </nav>
+  </header>
+  <main>
+    <div class="kicker">Briefing 02 of 03 · Diagnose vector search</div>
+    <h1>When someone sends just an error: every embedding step</h1>
+    <p class="lede">
+      <code>POST /api/errors/diagnose</code> never embeds the error “into the notes table.”
+      It embeds the pasted text with Titan V2, then measures cosine similarity against
+      <code>distinct_error_embeddings</code> — a different vector table from SAP Notes.
+      Notes are searched later, with a second (sometimes third) Titan call, against <code>summary_embeddings</code>.
+    </p>
+
+    <div class="callout gold">
+      <strong>Two vector stores. Do not mix them.</strong><br />
+      <code>distinct_error_embeddings</code> = known error <em>clusters</em> (have we seen this failure before?).<br />
+      <code>summary_embeddings</code> = SAP Note / Community <em>fixes</em> (which solution text is closest?).
+    </div>
+
+    <h2>Diagram — cluster match first, then solution search</h2>
+    <div class="diagram">
+      <div class="lane">
+        <div class="box"><h4>A. Request</h4>JSON <code>error_text</code> + Bearer token. Strip whitespace. Empty → 400.</div>
+        <div class="arrow">→</div>
+        <div class="box"><h4>B. Embed RAW</h4>Titan V2 of the <em>exact pasted string</em>. 1024-dim, normalized.</div>
+        <div class="arrow">→</div>
+        <div class="box"><h4>C. pgvector</h4><code>&lt;=&gt;</code> vs <code>distinct_error_embeddings</code>. Top 5. similarity = 1 − distance.</div>
+        <div class="arrow">→</div>
+        <div class="box"><h4>D. Threshold</h4>Best hit ≥ 0.70? Use that cluster. Stop searching clusters.</div>
+      </div>
+      <div class="branch">
+        <div class="box no"><h4>Miss — pass 2</h4>LLM generalizes (strip IDs/GUIDs). <strong>Embed generalized text</strong> (new Titan call). Same SQL, same 0.70 test.</div>
+        <div class="box yes"><h4>Still miss — new cluster</h4>LLM title/family/summary already in hand. Embed a <strong>blob</strong> (TITLE + GENERALIZED + SUMMARY) and insert it. That is the third cluster-side Titan call possible on one request.</div>
+      </div>
+      <p style="margin:16px 0 8px;color:var(--muted);font-size:13px;">Then, unless the family is informational (<code>RUN_DIAGNOSTIC_EVENT</code>):</p>
+      <div class="lane">
+        <div class="box"><h4>E. Embed query again</h4>Titan of generalized text (or title/raw fallback) for <code>hybrid_search</code>.</div>
+        <div class="arrow">→</div>
+        <div class="box"><h4>F. Notes vectors</h4><code>summary_embeddings</code> cosine, candidate 20, plus ILIKE keyword on both note tables.</div>
+        <div class="arrow">→</div>
+        <div class="box"><h4>G. Blend</h4>0.7 × vector + 0.3 × keyword. Keep hits with match_percent ≥ 70. Cap 10.</div>
+      </div>
+    </div>
+
+    <h2>Entry point — nothing is skipped</h2>
+    <ol class="tight">
+      <li>Client sends <code>POST /api/errors/diagnose</code> with Bearer (UI JWT or OAuth client_credentials).</li>
+      <li><code>routes/errors.py</code> validates <code>error_text</code> (min length 1) and optional <code>source</code>.</li>
+      <li><code>diagnose(raw_error, caller, source)</code> in <code>services/error_diagnose.py</code> runs the chain below.</li>
+    </ol>
+
+    <h2>Pass 1 — embed the raw error, search clusters</h2>
+
+    <div class="step">
+      <div class="num">1.1</div>
+      <div>
+        <span class="badge">strip</span>
+        <p><code>raw = error_text.strip()</code>. If empty, raise <code>ValueError("error_text is required")</code>. Locals start as: <code>created_new=False</code>, <code>match_percent=0.0</code>, <code>generalized=raw</code>, <code>gen=None</code>.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="num">1.2</div>
+      <div>
+        <span class="badge gold">Titan #1</span>
+        <p><code>_vector_search(raw)</code> calls <code>embed_text(raw)</code> on a thread. Same function notes use. Payload:</p>
+        <pre>{
+  "inputText": "&lt;the exact pasted error, no TITLE:/FAMILY: wrapper&gt;",
+  "dimensions": 1024,
+  "normalize": true
+}</pre>
+        <p>Model: <code>amazon.titan-embed-text-v2:0</code>. Output: 1024 floats. Converted to <code>'[0.12,-0.03,...]'</code> because asyncpg cannot send a Python list as <code>vector</code>.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="num">1.3</div>
+      <div>
+        <span class="badge">SQL</span>
+        <p>That query vector is bound twice (once for the similarity expression, once for ORDER BY):</p>
+        <pre>SELECT de.id, de.title, de.generalized_text, de.summary, de.family_code,
+       de.occurrence_count,
+       (1 - (dee.embedding &lt;=&gt; $1::vector)) AS similarity
+FROM distinct_error_embeddings dee
+JOIN distinct_errors de ON de.id = dee.distinct_error_id
+ORDER BY dee.embedding &lt;=&gt; $1::vector
+LIMIT $2   -- ERROR_VECTOR_SEARCH_LIMIT, default 5</pre>
+        <p><code>&lt;=&gt;</code> is pgvector cosine <em>distance</em>. Titan vectors are normalized, so cosine similarity ≈ <code>1 − distance</code>. Each row is clamped to <code>[0.0, 1.0]</code>.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="num">1.4</div>
+      <div>
+        <span class="badge mint">threshold</span>
+        <p><code>_best_match(hits)</code> looks only at <code>hits[0]</code> — already the nearest neighbor.</p>
+        <ul>
+          <li>No rows → miss.</li>
+          <li><code>hits[0].similarity &gt;= ERROR_MATCH_THRESHOLD</code> (default <strong>0.70</strong>) → hit. Cluster found.</li>
+          <li>Closest neighbor is 0.69 → treated as a complete miss. Neighbors 2–5 are never used as a fallback match.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="step">
+      <div class="num">1.5</div>
+      <div>
+        <span class="badge mint">if hit</span>
+        <p>Pass 2 is skipped. No LLM generalize. The code bumps the cluster (see briefing 03) and copies <code>distinct_row.generalized_text</code> into the working <code>generalized</code> variable — the caller’s raw text is <em>not</em> kept as the cluster identity. <code>match_percent = round(similarity * 100, 1)</code>.</p>
+      </div>
+    </div>
+
+    <h2>Pass 2 — only if pass 1 missed</h2>
+    <div class="step">
+      <div class="num">2.1</div>
+      <div>
+        <span class="badge coral">regex first</span>
+        <p><code>generalize_error(raw)</code> always runs <code>classify_text(raw)</code> first: walk <code>error_families.match_patterns</code> by <code>match_priority</code>, first regex hit wins. Catch-all <code>.*</code> is deferred. Empty text → <code>UNCLASSIFIED_ERROR</code>.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="num">2.2</div>
+      <div>
+        <span class="badge gold">LLM generalize</span>
+        <p>If <code>LLM_API_KEY</code> is set, DeepSeek is asked to strip user ids, tenant ids, timestamps, correlation ids, GUIDs, IPs, host paths, and keep the technical meaning. Temperature 0.2, up to 16384 tokens, 60s timeout, JSON object.</p>
+        <pre>{
+  "title": "descriptive label",
+  "generalized_text": "stable generic form of the full error",
+  "summary": "root-cause / context for search",
+  "family_code": "CODE_FROM_CATALOG"
+}</pre>
+        <p>Family rule: if the regex already found a real family, <strong>regex wins</strong> over the LLM. Else use the LLM code if it is in the catalog. Else <code>UNCLASSIFIED_ERROR</code>.</p>
+        <p>If the API key is missing, a tiny regex strips UUIDs and S-user ids (<code>S\d{7,10}</code>) and that cleaned string is used as title, generalized_text, and summary.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="num">2.3</div>
+      <div>
+        <span class="badge gold">Titan #2</span>
+        <p><code>_vector_search(generalized_text)</code> — a <strong>new</strong> embedding of the generalized string, not a reuse of the raw-error vector. Same SQL, same LIMIT 5, same 0.70 test.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="num">2.4</div>
+      <div>
+        <span class="badge mint">if hit</span>
+        <p>Same as 1.5: touch the cluster, adopt its stored generalized text, set match_percent. The LLM title/summary from this call are <strong>not written</strong> onto the existing cluster.</p>
+      </div>
+    </div>
+
+    <h2>Pass 3 — both searches missed: embed a new cluster blob</h2>
+    <p>If pass 2 never ran (theoretically: pass 1 miss but <code>gen</code> still None), generalize is called now. Then <code>_create_distinct(title, generalized, family_code, summary)</code>.</p>
+    <div class="callout warn">
+      <strong>Query vector ≠ stored vector format.</strong>
+      Pass 1 and 2 embed the error string as-is. A <em>new</em> cluster stores Titan of this blob:
+      <pre>TITLE: {title}
+
+GENERALIZED: {generalized_text}
+
+SUMMARY: {summary}</pre>
+      Matching still works because Titan is semantic, but the stored point is a richer document than the query. Future searches of similar raw errors are compared against this blob embedding, not against a raw-error embedding.
+    </div>
+    <ol class="tight">
+      <li>Fingerprint = SHA-256 of <code>generalized_text.strip()</code>. If that hash already exists, it is treated as old (no new embedding). See briefing 03.</li>
+      <li>Otherwise INSERT <code>distinct_errors</code>.</li>
+      <li>Build the blob above. SHA-256 it (<code>content_hash</code>).</li>
+      <li><span class="badge gold">Titan #3</span> <code>embed_text(blob)</code> in a thread.</li>
+      <li>INSERT into <code>distinct_error_embeddings</code> (<code>distinct_error_id</code>, hash, <code>?::vector</code>, model, timestamps). No upsert — one vector row per cluster.</li>
+    </ol>
+
+    <h2>Solution search — a separate embedding against SAP Notes</h2>
+    <p>After a cluster is chosen or created:</p>
+    <ol class="tight">
+      <li>Resolve <code>family_name</code> from <code>family_code</code>.</li>
+      <li>If <code>family_code == INFORMATIONAL_FAMILY_CODE</code> (default <code>RUN_DIAGNOSTIC_EVENT</code>): <strong>skip all of this</strong>. No Titan, no notes, no LLM fallback.</li>
+      <li>Query string = <code>generalized</code>, else cluster title, else original raw.</li>
+      <li><code>hybrid_search(query, limit=ERROR_SOLUTION_LIMIT)</code> (default 10, max 20).</li>
+    </ol>
+
+    <h3>Inside hybrid_search — exact embedding steps</h3>
+    <div class="step">
+      <div class="num">S.1</div>
+      <div>
+        <span class="badge gold">Titan again</span>
+        <p><code>_vector_hits</code> embeds the <em>query string</em> (generalized error), not the cluster blob and not the raw paste (unless those are what <code>query</code> is).</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="num">S.2</div>
+      <div>
+        <span class="badge">notes SQL</span>
+        <pre>SELECT source, summary_id,
+       (1 - (embedding &lt;=&gt; $1::vector)) AS similarity
+FROM summary_embeddings
+ORDER BY embedding &lt;=&gt; $1::vector
+LIMIT 20   -- HYBRID_CANDIDATE_LIMIT</pre>
+        <p>This table holds both <code>source='notes'</code> and <code>source='community'</code>. Family is <strong>not</strong> a filter. If Bedrock throws, vector hits become <code>[]</code> and search continues keyword-only.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="num">S.3</div>
+      <div>
+        <span class="badge">keyword</span>
+        <p>Parallel ILIKE <code>%query%</code> on latest <code>summaries</code> and <code>community_summaries</code> (title, issue, summary, tags). Python then scores: full-query in title = 1.0, in issue = 0.85, tags = 0.75, summary = 0.55; else token overlap × 0.4.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="num">S.4</div>
+      <div>
+        <span class="badge mint">blend</span>
+        <ul>
+          <li>Both scores &gt; 0 → <code>0.7 × vector + 0.3 × keyword</code></li>
+          <li>Vector only → vector score</li>
+          <li>Keyword only → keyword score</li>
+        </ul>
+        <p>Sort descending. Load full summary rows. <code>match_percent = round(score * 100)</code> as an integer.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="num">S.5</div>
+      <div>
+        <span class="badge coral">filter again</span>
+        <p>Diagnose keeps only hits with <code>match_percent &gt;= 70</code> (same 0.70 threshold × 100). So a note at 65% from hybrid search is dropped even though hybrid returned it.</p>
+        <p>If any remain → persist cluster↔note links (briefing 03) and return them as slim solutions (title, problem, fix, cautions, match_percent — no SAP note numbers in the diagnose JSON).</p>
+        <p>If zero remain (and not informational) → LLM fallback (ZHC prompt in <code>prompts.py</code>). That call does <strong>not</strong> produce or store an embedding.</p>
+      </div>
+    </div>
+
+    <h2>How many Titan calls can one paste trigger?</h2>
+    <table>
+      <tr><th>Situation</th><th>Titan calls</th><th>What is embedded</th></tr>
+      <tr><td>Raw text matches a cluster ≥ 70%</td><td>2</td><td>(1) raw error vs clusters (2) generalized/title/raw vs notes</td></tr>
+      <tr><td>Raw miss, generalized hits a cluster</td><td>3</td><td>(1) raw (2) generalized vs clusters (3) query vs notes</td></tr>
+      <tr><td>Both miss, new cluster, notes found</td><td>4</td><td>(1) raw (2) generalized vs clusters (3) new cluster blob (4) query vs notes</td></tr>
+      <tr><td>Informational family</td><td>1–3</td><td>Cluster search only. Notes embedding skipped.</td></tr>
+    </table>
+    <p>If pass 1 hits, generalize never runs, so the notes query is the <em>cluster’s stored</em> <code>generalized_text</code> (step 1.5), not a freshly generalized version of this paste.</p>
+
+    <h2>What this path does not do</h2>
+    <ul>
+      <li>It does not embed into <code>summary_embeddings</code> on diagnose. That table is write-on-scrape only.</li>
+      <li>It does not re-embed an existing cluster when a known error arrives. The stored vector stays the original blob.</li>
+      <li>It does not filter notes by <code>family_code</code>.</li>
+      <li>It does not compare raw text with SQL <code>LIKE</code> against <code>distinct_errors</code>. Cluster identity is vector (plus a fingerprint only when creating).</li>
+    </ul>
+
+    <footer>
+      Sourced from <code>services/error_diagnose.py</code>, <code>error_generalize.py</code>, <code>embeddings.py</code>, <code>mcp_server/tools/hybrid_search/handler.py</code>, <code>config.py</code>.
+      Open <a href="./03-error-save-new-vs-old.html">briefing 03</a> for every INSERT/UPDATE when the error is new vs already known.
+    </footer>
+  </main>
+</body>
+</html>

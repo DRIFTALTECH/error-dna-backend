@@ -24,12 +24,6 @@ OAUTH_TOKEN_TTL = int(os.getenv("OAUTH_TOKEN_TTL", "3600"))
 
 # Error diagnose — distinct-error vector match threshold (0–1).
 ERROR_MATCH_THRESHOLD = float(os.getenv("ERROR_MATCH_THRESHOLD", "0.70"))
-# Cluster graph — min cosine similarity for SIMILAR edges (0–1).
-GRAPH_SIMILARITY_THRESHOLD = float(os.getenv("GRAPH_SIMILARITY_THRESHOLD", "0.65"))
-# Max embedding-nearest neighbors per cluster in the graph.
-GRAPH_SIMILAR_K = int(os.getenv("GRAPH_SIMILAR_K", "8"))
-# Min similarity for solution↔solution NOTE_SIMILAR edges.
-GRAPH_NOTE_SIMILARITY_THRESHOLD = float(os.getenv("GRAPH_NOTE_SIMILARITY_THRESHOLD", "0.72"))
 # Vector candidates when matching raw/generalized text to distinct_errors.
 ERROR_VECTOR_SEARCH_LIMIT = int(os.getenv("ERROR_VECTOR_SEARCH_LIMIT", "5"))
 # Semantic solution notes returned per diagnose (no family filter).

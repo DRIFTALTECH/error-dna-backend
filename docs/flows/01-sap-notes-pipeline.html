@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>01 — SAP Notes pipeline · Error DNA</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=Outfit:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #0b1210;
+      --paper: #121a17;
+      --panel: #18211d;
+      --line: #2a3a33;
+      --gold: #d4a054;
+      --mint: #7dcea0;
+      --coral: #e07a5f;
+      --sky: #7eb8c9;
+      --text: #e7efe9;
+      --muted: #8fa197;
+      --dim: #5e7268;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #1c3328 0%, transparent 55%),
+        var(--ink);
+      color: var(--text);
+      font-family: Outfit, system-ui, sans-serif;
+      line-height: 1.55;
+    }
+    a { color: var(--mint); }
+    header.top {
+      position: sticky; top: 0; z-index: 20;
+      display: flex; align-items: center; gap: 18px;
+      padding: 14px 28px;
+      background: rgba(11,18,16,.88);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--line);
+    }
+    .mark {
+      font-family: Fraunces, serif;
+      font-weight: 700;
+      letter-spacing: -.03em;
+      color: var(--gold);
+    }
+    nav.series { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+    nav.series a {
+      text-decoration: none;
+      color: var(--muted);
+      border: 1px solid var(--line);
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+    }
+    nav.series a.on { color: var(--ink); background: var(--gold); border-color: var(--gold); }
+    main { max-width: 1080px; margin: 0 auto; padding: 48px 24px 96px; }
+    .kicker {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 12px;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+      color: var(--gold);
+    }
+    h1 {
+      font-family: Fraunces, serif;
+      font-size: clamp(2.1rem, 5vw, 3.4rem);
+      line-height: 1.08;
+      letter-spacing: -.03em;
+      margin: 8px 0 16px;
+    }
+    .lede { font-size: 1.15rem; color: var(--muted); max-width: 46rem; }
+    h2 {
+      font-family: Fraunces, serif;
+      font-size: 1.7rem;
+      margin: 56px 0 12px;
+      color: var(--gold);
+    }
+    h3 { font-size: 1.05rem; margin: 28px 0 8px; color: var(--sky); }
+    p { color: #d5e0d8; }
+    .callout {
+      border-left: 3px solid var(--gold);
+      background: var(--panel);
+      padding: 16px 20px;
+      margin: 24px 0;
+    }
+    .warn { border-left-color: var(--coral); }
+    .ok { border-left-color: var(--mint); }
+    code, pre {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 12.5px;
+    }
+    pre {
+      background: #0a0f0d;
+      border: 1px solid var(--line);
+      padding: 16px 18px;
+      overflow-x: auto;
+      border-radius: 8px;
+      color: #c9e6d4;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: .92rem;
+      margin: 16px 0 28px;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      padding: 10px 8px;
+      vertical-align: top;
+    }
+    th { color: var(--gold); font-weight: 600; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }
+    td { color: #d5e0d8; }
+    .pipe {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+      margin: 28px 0 8px;
+    }
+    .pipe .box {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 14px 12px;
+      min-height: 108px;
+      position: relative;
+    }
+    .pipe .box::after {
+      content: "→";
+      position: absolute;
+      right: -9px; top: 44%;
+      color: var(--gold);
+      font-size: 18px;
+      z-index: 1;
+    }
+    .pipe .box:last-child::after { content: ""; }
+    .pipe .n {
+      font-family: "IBM Plex Mono", monospace;
+      color: var(--gold);
+      font-size: 11px;
+    }
+    .pipe strong { display: block; margin: 6px 0 4px; }
+    .pipe span { color: var(--muted); font-size: 12.5px; }
+    .flow {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin: 24px 0 40px;
+    }
+    .node {
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 16px;
+    }
+    .rail {
+      width: 12px;
+      border-left: 2px solid var(--gold);
+      margin-left: 8px;
+      min-height: 18px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px 18px;
+      margin-bottom: 4px;
+    }
+    .card .tag {
+      display: inline-block;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px;
+      color: var(--ink);
+      background: var(--mint);
+      padding: 2px 8px;
+      border-radius: 999px;
+      margin-right: 8px;
+    }
+    .card .tag.gold { background: var(--gold); }
+    .card .tag.sky { background: var(--sky); }
+    .card .tag.coral { background: var(--coral); color: #1a0c08; }
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 800px) {
+      .split { grid-template-columns: 1fr; }
+      .pipe .box::after { content: ""; }
+    }
+    footer {
+      margin-top: 64px;
+      color: var(--dim);
+      font-size: 13px;
+      border-top: 1px solid var(--line);
+      padding-top: 20px;
+    }
+    ol.tight li { margin-bottom: 8px; }
+    svg.helix { width: 42px; height: 42px; }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <svg class="helix" viewBox="0 0 40 40" fill="none" aria-hidden="true">
+      <path d="M10 4c8 6 12 8 20 8M10 36c8-6 12-8 20-8M12 12c6 4 10 6 16 6M12 28c6-4 10-6 16-6" stroke="#d4a054" stroke-width="1.6"/>
+      <circle cx="10" cy="4" r="2.2" fill="#7dcea0"/><circle cx="30" cy="12" r="2.2" fill="#7eb8c9"/>
+      <circle cx="12" cy="20" r="2.2" fill="#e07a5f"/><circle cx="30" cy="28" r="2.2" fill="#7dcea0"/>
+      <circle cx="10" cy="36" r="2.2" fill="#d4a054"/>
+    </svg>
+    <div class="mark">Error DNA</div>
+    <nav class="series">
+      <a class="on" href="./01-sap-notes-pipeline.html">1 · Notes pipeline</a>
+      <a href="./02-error-embedding-search.html">2 · Error embeddings</a>
+      <a href="./03-error-save-new-vs-old.html">3 · Save new vs old</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="kicker">Briefing 01 of 03 · Knowledge-base ingest</div>
+    <h1>How SAP Notes are scraped, summarized, embedded, and stored</h1>
+    <p class="lede">
+      A pending URL is claimed by the background scheduler. OpenClaw drives headless Chrome through SAP login,
+      the page text is cleaned, DeepSeek rewrites it into a structured knowledge-base entry, that row is inserted
+      into PostgreSQL, and Amazon Titan V2 then stores a 1024-dimension vector of a canonical text blob.
+    </p>
+
+    <div class="callout">
+      <strong>One sentence.</strong>
+      Scheduler → scrape <code>me.sap.com</code> → LLM JSON summary → <code>summaries</code> table → Titan embed of
+      <code>title + family + issue + summary + tags + gotchas</code> → <code>summary_embeddings</code>.
+    </div>
+
+    <h2>End-to-end diagram</h2>
+    <div class="pipe">
+      <div class="box"><div class="n">01</div><strong>Queue</strong><span>Excel / UI inserts a row in <code>urls</code> with status <code>pending</code></span></div>
+      <div class="box"><div class="n">02</div><strong>Claim</strong><span>Scheduler atomically sets status <code>scraping</code></span></div>
+      <div class="box"><div class="n">03</div><strong>Scrape</strong><span>OpenClaw login state machine extracts Symptom / Resolution</span></div>
+      <div class="box"><div class="n">04</div><strong>LLM</strong><span>DeepSeek returns vendor-neutral JSON + family code</span></div>
+      <div class="box"><div class="n">05</div><strong>Save</strong><span>INSERT <code>summaries</code>, mark URL completed</span></div>
+      <div class="box"><div class="n">06</div><strong>Embed</strong><span>Titan V2 → INSERT <code>summary_embeddings</code></span></div>
+    </div>
+    <p style="color:var(--dim);font-size:13px;">Files: <code>routes/urls.py</code> → <code>services/scheduler.py:one_scrape</code> → <code>services/scraper.py</code> → <code>services/summarizer.py</code> → <code>services/embeddings.py</code></p>
+
+    <h2>1. How a note enters the queue</h2>
+    <p>
+      Someone adds a SAP Note URL from the UI (or an Excel upload). That is a plain INSERT into
+      <code>urls</code>: <code>source_id</code> (note number), <code>source_url</code>, title, component, dates.
+      Status starts as <code>pending</code>. Nothing is scraped yet.
+    </p>
+    <p>
+      On API startup, <code>main.py</code> lifespan calls <code>services.scheduler.start()</code>. That loop
+      wakes every 30 seconds (and respects a random delay between scrapes, plus a pause if community ingest is using Chrome).
+    </p>
+
+    <h2>2. Scheduler claims one URL</h2>
+    <p>Each run of <code>one_scrape()</code> does this, in order:</p>
+    <ol class="tight">
+      <li>Load the <strong>active SAP credential</strong> from <code>credentials</code> (<code>is_active=1</code>). Password is Fernet-decrypted.</li>
+      <li><strong>Atomic claim</strong> — one SQL statement sets the oldest pending row to <code>scraping</code> and returns it. Two API processes cannot grab the same URL.</li>
+      <li>If the queue is empty, it returns.</li>
+      <li><strong>Skip if already in the KB.</strong> If <code>summaries</code> already has <code>is_latest=1</code> for that <code>source_id</code> with <code>source_version ≥ 1</code>, the URL is marked <code>skipped</code>. No scrape, no LLM, no embedding.</li>
+    </ol>
+    <pre>UPDATE urls SET status='scraping'
+ WHERE id = (SELECT id FROM urls WHERE status='pending' ORDER BY id ASC LIMIT 1)
+ RETURNING *</pre>
+
+    <h2>3. Browser scrape (OpenClaw)</h2>
+    <p>
+      <code>scrape_note(url, username, password)</code> runs in a worker thread (it is synchronous subprocess I/O).
+      A process-wide lock ensures notes scrape, community ingest, and credential test-login never interleave Chrome commands.
+    </p>
+
+    <div class="flow">
+      <div class="node">
+        <div class="rail"></div>
+        <div class="card"><span class="tag gold">navigate</span> Open <code>source_url</code> via <code>openclaw browser navigate</code>. If the active SAP account changed since last scrape, cookies are cleared first.</div>
+      </div>
+      <div class="node">
+        <div class="rail"></div>
+        <div class="card"><span class="tag">probe</span> A DOM probe returns URL, text length, password field, S-user tiles, buttons. <code>classify()</code> maps that to a state.</div>
+      </div>
+      <div class="node">
+        <div class="rail"></div>
+        <div class="card"><span class="tag sky">state machine</span> Up to 18 steps: <code>landing</code> → <code>login_user</code> → <code>login_pass</code> → <code>account_select</code> → <code>keep_signed</code> → <code>consent</code> → <code>target</code>. MFA cannot be automated — scrape fails with <code>mfa_required</code>.</div>
+      </div>
+      <div class="node">
+        <div class="rail"></div>
+        <div class="card"><span class="tag">extract</span> Target page = text length &gt; 200 and contains “symptom” / “resolution”. Inner text of <code>[role=main]</code> is pulled.</div>
+      </div>
+      <div class="node">
+        <div class="rail"></div>
+        <div class="card"><span class="tag">parse</span> Lines are split into TITLE + SYMPTOM + ENVIRONMENT + RESOLUTION + KEYWORDS. Chrome UI chrome is dropped. Result: <code>clean_text</code>.</div>
+      </div>
+      <div class="node">
+        <div></div>
+        <div class="card"><span class="tag gold">attachments</span> Best-effort: click Attachments tab, download files, extract text (XSD/XML/PDF/…), append to <code>clean_text</code> for the LLM. Bytes are kept so the scheduler can persist them.</div>
+      </div>
+    </div>
+
+    <div class="callout warn">
+      If scrape fails, the URL is set to <code>failed</code>, a row is written to <code>scrape_log</code> with the step trace, and the job stops. No LLM. No embedding.
+    </div>
+
+    <h2>4. Attachments are saved before the LLM</h2>
+    <p>
+      Each attachment’s bytes go through <code>image_store.save(..., kind="doc")</code> — S3 if <code>S3_BUCKET</code> is set, otherwise local <code>data/images/</code>.
+      A manifest <code>[{name, key, ext}]</code> is kept. If the LLM later fails, those blobs are deleted so they do not orphan.
+    </p>
+
+    <h2>5. Passing the note to the LLM</h2>
+    <p>
+      <code>summarize(clean_text)</code> in <code>services/summarizer.py</code> POSTs to a DeepSeek-compatible chat-completions endpoint
+      (<code>LLM_API_URL</code>, default <code>https://api.deepseek.com/v1/chat/completions</code>, model <code>deepseek-chat</code>).
+    </p>
+    <table>
+      <tr><th>Piece</th><th>What is sent</th></tr>
+      <tr><td>System prompt</td><td>Senior technical writer. Ignore page chrome. Never say “SAP”. Classify into one family <strong>code</strong> from the live catalog (<code>error_families</code> seeded from <code>data/error_families.csv</code>).</td></tr>
+      <tr><td>User prompt</td><td><code>Summarize this technical article:</code> plus the first <strong>15,000 characters</strong> of <code>clean_text</code> (attachments already appended).</td></tr>
+      <tr><td>API knobs</td><td><code>temperature=0.3</code>, <code>max_tokens=4000</code>, <code>response_format=json_object</code>, 60s timeout.</td></tr>
+    </table>
+    <p>Expected JSON keys:</p>
+    <pre>{
+  "title": "...",
+  "family": "OAUTH_TOKEN_REQUEST_FAILED",   // catalog CODE, not display name
+  "area":  "same as family",
+  "type":  "Problem" | "How To" | "FAQ" | "Configuration",
+  "issue": "2–3 sentences of what goes wrong",
+  "summary": "root cause + technical context",
+  "steps":  [{ "title": "...", "details": ["..."] }],
+  "gotchas": ["..."],
+  "tags": ["..."],
+  "environment": ["Cloud Integration", "BTP"]
+}</pre>
+
+    <h3>Family is not trusted blindly</h3>
+    <ol class="tight">
+      <li>If the LLM’s <code>family</code> is a known catalog code, keep it.</li>
+      <li>Else try mapping it as a display name via <code>code_from_family_field</code>.</li>
+      <li>Else regex-classify <code>issue + summary</code> with <code>classify_text</code> (patterns on <code>error_families</code>, lowest <code>match_priority</code> wins).</li>
+      <li>If still unknown → <code>UNCLASSIFIED_ERROR</code>.</li>
+    </ol>
+    <p>Arrays (<code>steps</code>, <code>gotchas</code>, <code>tags</code>, <code>environment</code>) are JSON-stringified before they hit PostgreSQL, because those columns are <code>TEXT</code>.</p>
+
+    <h2>6. Saving the summary</h2>
+    <p>One INSERT into <code>summaries</code>, then the URL is marked completed:</p>
+    <pre>INSERT INTO summaries (
+  source_id, url_id, title, family, area, type, issue, summary,
+  steps, gotchas, tags, source_version, source_date, source_url,
+  component, environment, attachments, is_latest, verification_status,
+  created_at, updated_at
+) VALUES (..., 1, 'current', now_ist, now_ist)
+RETURNING id
+
+UPDATE urls SET status='completed', scraped_at=? WHERE id=?</pre>
+    <p>
+      <code>attachments</code> stores the S3/local key manifest, not the file bytes.
+      Timestamps are IST text, not <code>timestamptz</code>.
+    </p>
+    <p>A success row is also written to <code>scrape_log</code> with the full step trace (navigate, login, extract, summarize, store, embed).</p>
+
+    <h2>7. Finding and saving the embedding</h2>
+    <p>
+      Immediately after the summary INSERT, the scheduler calls
+      <code>embed_summary_safe("notes", summary_id, source_id, row)</code>.
+      This is <strong>best-effort</strong>: if Bedrock fails, the scrape is still a success. The note exists without a vector until a backfill job runs.
+    </p>
+
+    <h3>Canonical blob (this is what gets embedded — not the raw SAP page)</h3>
+    <pre>TITLE: {title}
+
+FAMILY: {family}
+
+ISSUE: {issue}
+
+SUMMARY: {summary}
+
+TAGS: {tags}
+
+GOTCHAS: {gotchas}</pre>
+    <p>
+      Defined in <code>services/embeddings.py:build_blob</code>. Images, attachment bodies, raw page text, steps, and source URLs are <strong>not</strong> in the vector.
+      Changing this format would invalidate stored hashes and force re-embedding.
+    </p>
+
+    <h3>Exact embed steps — do not skip any</h3>
+    <ol class="tight">
+      <li>Build the blob string from the six fields above.</li>
+      <li>SHA-256 hex digest of the blob → <code>content_hash</code>.</li>
+      <li>SELECT existing row from <code>summary_embeddings</code> where <code>source='notes'</code> AND <code>summary_id=?</code>.</li>
+      <li>If a row exists and the hash matches → <strong>skipped</strong>. Titan is not called. This is how re-scrapes of unchanged text stay cheap.</li>
+      <li>Otherwise call Amazon Titan Text Embeddings V2 via Bedrock (<code>amazon.titan-embed-text-v2:0</code>, region from <code>EMBED_REGION</code>). boto3 is synchronous, so it runs in <code>asyncio.to_thread</code>.</li>
+      <li>Request body: <code>{"inputText": blob, "dimensions": 1024, "normalize": true}</code>.</li>
+      <li>Response must be exactly 1024 floats. They are already L2-normalized.</li>
+      <li>Convert the list to a pgvector text literal <code>[0.12, -0.03, ...]</code> (asyncpg has no vector codec).</li>
+      <li>UPSERT:</li>
+    </ol>
+    <pre>INSERT INTO summary_embeddings
+  (source, summary_id, source_id, content_hash, embedding, model, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?::vector, ?, ?, ?)
+ON CONFLICT (source, summary_id) DO UPDATE SET
+  source_id, content_hash, embedding, model, updated_at = EXCLUDED...</pre>
+    <table>
+      <tr><th>Column</th><th>Meaning</th></tr>
+      <tr><td><code>source</code></td><td><code>'notes'</code> for SAP Notes. Community uses <code>'community'</code> in the same table.</td></tr>
+      <tr><td><code>summary_id</code></td><td>Primary key of the <code>summaries</code> row just inserted.</td></tr>
+      <tr><td><code>source_id</code></td><td>SAP Note number (e.g. <code>3780883</code>).</td></tr>
+      <tr><td><code>content_hash</code></td><td>SHA-256 of the blob. Skip-if-unchanged key.</td></tr>
+      <tr><td><code>embedding</code></td><td><code>vector(1024)</code> — pgvector. Cosine distance <code>&lt;=&gt;</code> later.</td></tr>
+      <tr><td><code>model</code></td><td><code>amazon.titan-embed-text-v2:0</code></td></tr>
+    </table>
+
+    <div class="callout ok">
+      After this, the note is searchable. Diagnose and MCP <code>hybrid_search</code> both query <code>summary_embeddings</code>
+      with the same Titan model so query vectors and stored vectors live in one space.
+    </div>
+
+    <h2>8. Parallel path: SAP Community (same embed shape)</h2>
+    <p>
+      Community is <em>not</em> on the scheduler. A UI action drains <code>community_urls</code> one-by-one
+      (<code>services/community_ingest.py</code>). Differences that matter:
+    </p>
+    <ul>
+      <li>No SAP login. OpenClaw waits out Cloudflare, captures up to 3 content images.</li>
+      <li>LLM is called with <code>allow_skip=True</code>. Blogs/announcements return <code>{"is_solution": false}</code> and are <strong>not stored</strong>.</li>
+      <li>Row goes to <code>community_summaries</code>, not <code>summaries</code>.</li>
+      <li>Embedding still uses <code>embed_summary_safe("community", ...)</code> and the <strong>same blob format</strong> in <code>summary_embeddings</code>.</li>
+    </ul>
+
+    <h2>9. Backfill</h2>
+    <p>
+      If a scrape succeeded but Bedrock was down, the note has no vector.
+      <code>services/embed_backfill.py</code> finds latest <code>summaries</code> with no matching
+      <code>summary_embeddings</code> row and calls the same <code>upsert_embedding</code>.
+    </p>
+
+    <div class="split">
+      <div class="callout">
+        <strong>Written on success</strong>
+        <ul>
+          <li><code>urls.status = completed</code></li>
+          <li><code>summaries</code> row</li>
+          <li><code>summary_embeddings</code> row (if Titan worked)</li>
+          <li><code>scrape_log</code> success + trace</li>
+          <li>Attachment blobs in S3 / local disk</li>
+        </ul>
+      </div>
+      <div class="callout warn">
+        <strong>Not embedded</strong>
+        <ul>
+          <li>Raw SAP HTML / innerText</li>
+          <li>Step-by-step JSON (except what leaked into summary text)</li>
+          <li>Attachment file bodies (text is in the LLM prompt, not the vector)</li>
+          <li>Note number / URL / dates</li>
+        </ul>
+      </div>
+    </div>
+
+    <footer>
+      Sourced from <code>services/scheduler.py</code>, <code>scraper.py</code>, <code>summarizer.py</code>, <code>embeddings.py</code>, <code>db.py</code>.
+      Open <a href="./02-error-embedding-search.html">briefing 02</a> for what happens when someone pastes an error.
+    </footer>
+  </main>
+</body>
+</html>
