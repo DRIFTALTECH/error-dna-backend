@@ -166,9 +166,16 @@ curl -s -X POST "https://16.113.9.182.sslip.io/api/errors/diagnose" \
 
 ## Knowledge base flow — the ingest chain
 
-One chain, seven steps, in `services/ingest_chain.py`. Both SAP Notes and SAP
-Community pages run it; a `source` parameter picks the tables and decides whether
-step 2 needs credentials. Nothing else ingests.
+One chain, eight steps, in `services/ingest_chain.py`. Both SAP Notes and SAP
+Community run it; `SOURCES[source]["reader"]` picks how steps 2–4 get the content.
+Nothing else ingests.
+
+**Notes** go through the signed-in headless browser. **Community** goes through the
+Khoros public API (`services/community_api.py`) — community.sap.com is Cloudflare-
+fronted, and a headless browser on a datacenter IP gets a managed challenge it can
+never clear. The API answers anonymously and returns more than the page did: every
+message in the thread, `is_solution` per reply, `conversation.solved` per thread, and
+image URLs that fetch with a plain GET.
 
 ```
 cron (services/scheduler.py) — decides WHEN, nothing else
@@ -195,6 +202,11 @@ cron (services/scheduler.py) — decides WHEN, nothing else
 ┌─ 4 extract ───────────────────────────────────────────────┐
 │  Article text + attachments (notes) or images (community). │
 │  Blobs go to S3/local now; the LLM never carries bytes.    │
+└────────────────────────────────────────────────────────────┘
+        ▼
+┌─ 4b describe_images ──────────────────────────────────────┐
+│  Vision caption + OCR per image, so error text inside a    │
+│  screenshot becomes searchable. Non-fatal, notes skip it.  │
 └────────────────────────────────────────────────────────────┘
         ▼
 ┌─ 5 summarize ─────────────────────────────────────────────┐
@@ -326,6 +338,8 @@ All tunables live in `.env` with inline comments explaining each key. Highlights
 | `ERROR_SOLUTION_LIMIT` | `10` | Knowledge base fixes returned per diagnose |
 | `ERROR_VECTOR_SEARCH_LIMIT` | `5` | Cluster candidates pulled in L2 |
 | `CHAIN_STEP_DELAY_SEC` | `3` | Pause between ingest chain steps |
+| `COMMUNITY_MAX_IMAGES` | `8` | Images pulled per community thread |
+| `COMMUNITY_REQUIRE_ANSWER` | `1` | Skip threads with no replies before the LLM call |
 | `CHAIN_PAGE_RETRIES` | `3` | Step 3 re-verify attempts before failing |
 | `COMMUNITY_LOGIN_URL` | Khoros login page | Where community signs in (hands off to SAP ID) |
 | `COMMUNITY_PAGE_RETRIES` | `10` | Step 3 attempts for community — Cloudflare needs longer |

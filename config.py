@@ -50,6 +50,13 @@ ERROR_FALLBACK_TEMPERATURE = float(os.getenv("ERROR_FALLBACK_TEMPERATURE", "0.2"
 ERROR_FALLBACK_MAX_TOKENS = int(os.getenv("ERROR_FALLBACK_MAX_TOKENS", "8192"))
 ERROR_FALLBACK_TIMEOUT = float(os.getenv("ERROR_FALLBACK_TIMEOUT", "120"))
 
+# Blob storage for community images and note attachments. S3 when S3_BUCKET is set,
+# else local disk served through /api/files/.
+S3_BUCKET = os.getenv("S3_BUCKET", "").strip()
+S3_REGION = os.getenv("S3_REGION", AWS_REGION).strip()
+IMAGE_LOCAL_DIR = os.getenv(
+    "IMAGE_LOCAL_DIR", str(Path(__file__).parent / "data" / "images"))
+
 # Reversible encryption for stored SAP account passwords (Fernet key derived from this).
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")
 
@@ -75,16 +82,19 @@ SUMMARIZE_MAX_TOKENS = int(os.getenv("SUMMARIZE_MAX_TOKENS", "4000"))
 SUMMARIZE_TIMEOUT = float(os.getenv("SUMMARIZE_TIMEOUT", "120"))
 # Max article chars handed to the LLM.
 SUMMARIZE_MAX_INPUT_CHARS = int(os.getenv("SUMMARIZE_MAX_INPUT_CHARS", "15000"))
-# Community drain — pause between URLs so Chrome reclaims RAM on small boxes.
-COMMUNITY_INTER_ITEM_SLEEP_SEC = float(os.getenv("COMMUNITY_INTER_ITEM_SLEEP_SEC", "60"))
-# Community sign-in lands here first (Khoros hands off to accounts.sap.com, the same
-# IdP the notes scraper already drives). An existing session redirects straight back.
-COMMUNITY_LOGIN_URL = os.getenv(
-    "COMMUNITY_LOGIN_URL", "https://community.sap.com/t5/user/userloginpage/tab/user")
-# A community thread shorter than this is a shell/redirect, not the article.
-COMMUNITY_MIN_CHARS = int(os.getenv("COMMUNITY_MIN_CHARS", "600"))
-# Step 3 attempts for community pages — Cloudflare needs longer than a note.
-COMMUNITY_PAGE_RETRIES = int(os.getenv("COMMUNITY_PAGE_RETRIES", "10"))
+# Community drain — pause between URLs. No browser any more, so this is politeness
+# toward the API rather than RAM relief; it can go much lower than the browser era.
+COMMUNITY_INTER_ITEM_SLEEP_SEC = float(os.getenv("COMMUNITY_INTER_ITEM_SLEEP_SEC", "5"))
+# SAP Community is read through the Khoros public API — no browser, no login.
+# community.sap.com is Cloudflare-fronted and a headless browser on a datacenter IP
+# gets a managed challenge it cannot clear; this endpoint answers anonymously.
+COMMUNITY_API_URL = os.getenv("COMMUNITY_API_URL", "https://community.sap.com/api/2.0/search")
+COMMUNITY_API_TIMEOUT = float(os.getenv("COMMUNITY_API_TIMEOUT", "30"))
+# Images pulled per thread, and the per-image size ceiling.
+COMMUNITY_MAX_IMAGES = int(os.getenv("COMMUNITY_MAX_IMAGES", "8"))
+COMMUNITY_IMAGE_MAX_BYTES = int(os.getenv("COMMUNITY_IMAGE_MAX_BYTES", "3000000"))
+# Threads with no reply hold no answer — skip before spending an LLM call.
+COMMUNITY_REQUIRE_ANSWER = os.getenv("COMMUNITY_REQUIRE_ANSWER", "1") == "1"
 
 # Embeddings — Amazon Titan Text Embeddings V2 via Bedrock (same AWS creds as Aurora IAM).
 EMBED_MODEL_ID = os.getenv("EMBED_MODEL_ID", "amazon.titan-embed-text-v2:0")

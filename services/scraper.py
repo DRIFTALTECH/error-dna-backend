@@ -378,9 +378,15 @@ def ensure_session(url: str, username: str = None, password: str = None) -> dict
 
     # Account changed since the last login (rotate) → drop the old cookie so we
     # sign in as the NEW account instead of riding "keep me signed in".
+    #
+    # Claim the account HERE, not on success. _last_account means "the jar belongs
+    # to this account", and after the clear it does. Setting it only on success let
+    # a failing account re-clear on every single attempt, which wiped the Cloudflare
+    # clearance cookie before each try and made recovery impossible.
     if username and _last_account is not None and username != _last_account:
         _clear_session()
         rec("session", "info", "Account switched — cleared persisted session", username)
+        _last_account = username
 
     nav_ok, nav_out = _navigate(url, timeout=30)
     rec("navigate", "ok" if nav_ok else "error",
@@ -812,142 +818,6 @@ def extract_note() -> dict:
 
     return {"ok": True, "raw_text": text, "clean_text": clean_text, "title": title,
             "attachments": attachments, "error": "", "trace": trace}
-
-
-# ---- SAP Community (public, no login) ------------------------------------
-
-# Cloudflare's "just a moment" JS challenge is in _LOADING_KW, so _looks_loading
-# already reports the challenge page as "still loading". A real browser clears it
-# on its own within a few seconds; we just keep re-probing until it does.
-COMMUNITY_LOADING_WAITS = 10
-
-
-# Keep image capture tiny on EC2: base64 travels Chrome → openclaw stdout → Python.
-# 6×4MB data-URLs previously blew small instances (OOM → whole box dies).
-MAX_COMMUNITY_IMAGES = 3
-MAX_COMMUNITY_IMAGE_BYTES = 400_000  # ~400 KB each
-MAX_COMMUNITY_TEXT_CHARS = 40_000    # trim before returning to ingest/LLM
-
-# In-page: collect content images (skip avatars/icons/emoji), each with its ALT,
-# the nearby text (context for placement), and the bytes as a data URL — fetched
-# in-page so the browser's Cloudflare cookie is used (the CDN is gated too).
-_IMAGES_FN = r"""async ()=>{
-  const clean = s => (s||'').replace(/\s+/g,' ').trim();
-  const maxBytes = %MAX_BYTES%;
-  const imgs = [...document.querySelectorAll('img')].filter(i =>
-    i.offsetParent && i.naturalWidth > 80 && i.naturalHeight > 80 &&
-    !/avatar|emoji|icon|rank|badge|sprite|logo|smiley/i.test((i.src||'')+(i.className||'')));
-  const seen = new Set(); const out = [];
-  for (const i of imgs) {
-    if (out.length >= %MAX%) break;
-    const src = i.src; if (!src || seen.has(src)) continue; seen.add(src);
-    // context = alt, figure caption, or the text of the nearest block ancestor.
-    let ctx = clean(i.alt);
-    const fig = i.closest('figure'); if (fig) ctx = clean(fig.textContent) || ctx;
-    if (!ctx) { let n = i.parentElement; for (let k=0;k<4&&n;k++){ const t=clean(n.textContent); if (t.length>15){ctx=t;break;} n=n.parentElement; } }
-    let dataUrl = '';
-    try { const r = await fetch(src); const b = await r.blob();
-      if (b.size > 0 && b.size < maxBytes) dataUrl = await new Promise(res=>{const fr=new FileReader();fr.onload=()=>res(fr.result);fr.onerror=()=>res('');fr.readAsDataURL(b);}); } catch(e){}
-    out.push({ src, alt: clean(i.alt).slice(0,120), context: ctx.slice(0,400), dataUrl });
-  }
-  return JSON.stringify(out);
-}""".replace("%MAX%", str(MAX_COMMUNITY_IMAGES)).replace("%MAX_BYTES%", str(MAX_COMMUNITY_IMAGE_BYTES))
-
-
-def _decode_json(out: str):
-    """Decode openclaw evaluate output. JSON.stringify returns are often
-    double-wrapped in quotes — peel up to twice (same pattern as _probe)."""
-    val = (out or "").strip()
-    for _ in range(2):
-        if isinstance(val, (dict, list)):
-            break
-        try:
-            val = json.loads(val)
-        except Exception:
-            return None
-    return val
-
-
-def _extract_community_images() -> list:
-    """Return [{ref,'src','alt','context','data_b64','ext'}] for content images on the page."""
-    ok, out = _run(["evaluate", "--fn", _IMAGES_FN], timeout=45)
-    if not ok or not out:
-        return []
-    raw = _decode_json(out)
-    if not isinstance(raw, list):
-        return []
-    images = []
-    for idx, im in enumerate(raw, 1):
-        if not isinstance(im, dict):
-            continue
-        data_url = im.get("dataUrl") or ""
-        if not data_url.startswith("data:image/"):
-            continue
-        try:
-            header, b64 = data_url.split(",", 1)
-            ext = header.split("/", 1)[1].split(";", 1)[0].lower()  # data:image/png;base64
-            ext = {"jpeg": "jpg", "svg+xml": "svg"}.get(ext, ext)
-        except Exception:
-            continue
-        images.append({
-            "ref": f"image_{idx}",
-            "src": im.get("src", ""),
-            "alt": im.get("alt", ""),
-            "context": im.get("context", ""),
-            "data_b64": b64,
-            "ext": ext,
-        })
-    return images
-
-
-def extract_community() -> dict:
-    """Step 4 (community) — read the open forum page + its content images.
-
-    Returns {ok, raw_text, clean_text, title, images, error, trace}. Always releases
-    the page so Chromium can GC the SPA before the next URL.
-    """
-    trace, rec = _tracer()
-    try:
-        ok, text = _get_text()
-        text = text or ""
-        if not ok or len(text) < 100:
-            rec("extract", "error", "Extracted text too short", f"{len(text)} chars")
-            return {"ok": False, "error": "too_short", "raw_text": text[:500], "trace": trace}
-
-        sig = _probe() or {}
-        title = sig.get("heading") or ""
-        if not title:
-            title = next((ln.strip()[:120] for ln in text.split("\n") if len(ln.strip()) > 8), "")
-
-        # Community SPA dumps are huge; the LLM only needs the article body.
-        if len(text) > MAX_COMMUNITY_TEXT_CHARS:
-            rec("parse", "warn", f"Truncated text {len(text)} → {MAX_COMMUNITY_TEXT_CHARS} chars",
-                title[:60] or None)
-            text = text[:MAX_COMMUNITY_TEXT_CHARS]
-        else:
-            rec("parse", "ok", f"Extracted {len(text)} chars", title[:60] or None)
-
-        images = []
-        try:
-            images = _extract_community_images()
-            rec("images", "ok" if images else "info",
-                f"Captured {len(images)} image(s)" if images else "No content images",
-                ", ".join(i["ref"] for i in images) or None)
-        except Exception as e:
-            rec("images", "warn", "Image capture failed — text only", str(e))
-
-        return {"ok": True, "raw_text": text, "clean_text": text, "title": title,
-                "images": images, "error": "", "trace": trace}
-    finally:
-        _release_browser_page()
-
-
-def _release_browser_page() -> None:
-    """Navigate away so Chromium can GC the previous community SPA + image blobs."""
-    try:
-        _run(["navigate", "about:blank"], timeout=15)
-    except Exception:
-        pass
 
 
 if __name__ == "__main__":

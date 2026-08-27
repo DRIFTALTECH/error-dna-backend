@@ -244,8 +244,13 @@ NOT-A-SOLUTION CHECK: this source may be a blog, announcement, product news, opi
 """
 
 # Appended when the page carried images the model should place inline.
+# Single braces on purpose: this string is passed to the chain as the VALUE of the
+# `extra_rules` template variable, and PromptTemplate does not unescape values. A
+# {{image_N}} here reaches the model as literal double braces, and it dutifully
+# emits {{image_2}} — which the frontend's {image_N} matcher then half-renders,
+# leaving stray braces around every picture.
 SUMMARIZE_IMAGE_RULE = """
-IMAGES: the article has attached images, listed under ATTACHED IMAGES below. In `summary` and/or `steps`, insert the token {{image_N}} (e.g. {{image_1}}) on its OWN line at the single most relevant point for each image, judging from its context text. Use each token exactly once, never invent tokens, and keep the exact spelling so the app can swap in the real image.
+IMAGES: the article has attached images, listed under ATTACHED IMAGES below. In `summary` and/or `steps`, insert the token {image_N} (exactly as written, e.g. {image_1}) on its OWN line at the single most relevant point for each image, judging from its context text. Use single curly braces, never double. Use each token exactly once, never invent tokens, and keep the exact spelling so the app can swap in the real image.
 """
 
 

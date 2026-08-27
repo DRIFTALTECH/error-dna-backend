@@ -13,21 +13,32 @@ Keys: "img/<uuid>.<ext>" or "doc/<uuid>.<ext>". S3 → presigned GET; local → 
 import os
 import logging
 
+from config import IMAGE_LOCAL_DIR as _LOCAL_DIR, S3_BUCKET, S3_REGION
+
 logger = logging.getLogger(__name__)
 
-S3_BUCKET = os.getenv("S3_BUCKET", "").strip()
-S3_REGION = os.getenv("S3_REGION", os.getenv("AWS_REGION", "ap-south-2")).strip()
-_LOCAL_DIR = os.getenv("IMAGE_LOCAL_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "images"))
 _PRESIGN_TTL = 7 * 24 * 3600  # 7 days
 
 _s3 = None
 
 
 def _client():
+    """S3 client pinned to the bucket's own regional endpoint.
+
+    Opt-in regions (ap-south-2 among them) reject the global s3.amazonaws.com host:
+    boto3's default presign signs for the region but addresses the global endpoint,
+    and every URL comes back 400 IllegalLocationConstraintException. SigV4 plus
+    virtual addressing produces bucket.s3.<region>.amazonaws.com, which works.
+    """
     global _s3
     if _s3 is None:
         import boto3
-        _s3 = boto3.client("s3", region_name=S3_REGION)
+        from botocore.config import Config
+        _s3 = boto3.client(
+            "s3",
+            region_name=S3_REGION,
+            config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+        )
     return _s3
 
 

@@ -40,6 +40,10 @@ Return JSON only, no markdown:
 """
 
 
+class ProviderDown(Exception):
+    """5xx — the service is down, not this key. Back the whole provider off."""
+
+
 class QuotaError(Exception):
     """429 / 401 / 403 — cool this Gemini key and try the next."""
 
@@ -286,6 +290,8 @@ async def _gemini(image_bytes: bytes, mime: str, api_key: str, model: str) -> di
         r = await client.post(url, headers={"x-goog-api-key": api_key}, json=payload)
     if r.status_code in (401, 403, 429):
         raise QuotaError(r.status_code, r.text[:200])
+    if r.status_code >= 500:
+        raise ProviderDown(f"HTTP {r.status_code}: {r.text[:200]}")
     r.raise_for_status()
     try:
         text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
@@ -334,12 +340,29 @@ async def _aicore(image_bytes: bytes, mime: str, row: dict) -> dict:
     return {"caption": caption[:800], "ocr_text": "", "kind": "screenshot"}
 
 
+# When the provider itself is 5xx-ing, every further image would pay the full
+# VISION_TIMEOUT before failing the same way. Back off once, process-wide, so a
+# thread with N screenshots costs one timeout instead of N.
+# ponytail: module global, resets on restart. Per-provider state if we ever run two.
+_provider_down_until: datetime | None = None
+
+
+def provider_backoff_left() -> int:
+    """Seconds until the provider is retried, 0 when it is not backed off."""
+    if _provider_down_until is None:
+        return 0
+    return max(0, int((_provider_down_until - _now()).total_seconds()))
+
+
 async def describe(image_bytes: bytes, mime: str = "image/png") -> dict:
     """Look at one image. Empty result = caller keeps alt/context. Never raises for 'off'."""
+    global _provider_down_until
     if not image_bytes:
         return dict(EMPTY)
     provider = await active_provider()
     if provider == "off":
+        return dict(EMPTY)
+    if provider_backoff_left():
         return dict(EMPTY)
     if provider == "aicore":
         rows = await list_rows("aicore")
@@ -350,6 +373,11 @@ async def describe(image_bytes: bytes, mime: str = "image/png") -> dict:
             out = await _aicore(image_bytes, mime, row)
             await _mark(row["id"])
             return out
+        except ProviderDown as e:
+            _provider_down_until = _now() + timedelta(seconds=VISION_COOLDOWN_SEC)
+            logger.warning(f"AI Core down — vision backed off {VISION_COOLDOWN_SEC}s: {e}")
+            await _mark(row["id"], error=str(e)[:400])
+            return dict(EMPTY)
         except Exception as e:
             logger.warning(f"AI Core vision failed: {e}")
             await _mark(row["id"], error=str(e)[:400])
@@ -366,6 +394,13 @@ async def describe(image_bytes: bytes, mime: str = "image/png") -> dict:
             out = await _gemini(image_bytes, mime, _secret(row), model)
             await _mark(row["id"])
             return out
+        except ProviderDown as e:
+            # Not this key's fault — every key would get the same 5xx.
+            last_err = str(e)[:400]
+            _provider_down_until = _now() + timedelta(seconds=VISION_COOLDOWN_SEC)
+            logger.warning(f"Gemini down — vision backed off {VISION_COOLDOWN_SEC}s: {e}")
+            await _mark(row["id"], error=last_err)
+            break
         except QuotaError as e:
             last_err = str(e)
             await _mark(row["id"], error=last_err, cooldown=True)

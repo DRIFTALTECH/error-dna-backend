@@ -36,6 +36,7 @@ No pytest, no test framework. Verification is `__main__` self-checks inside the 
 ```bash
 python3 -m mcp_server selftest      # exercises all 4 MCP tool handlers against the live DB
 python3 -m services.ingest_chain    # chain wiring: step order, prompt render, abort routing
+python3 -m services.community_api   # URL -> topic id, HTML -> text, image URL filter
 python3 -m services.auth            # password hash + token round-trip
 python3 -m services.error_diagnose  # fingerprinting, solution floor, envelope shape
 python3 -m services.error_expand    # family validation + no-LLM degraded path
@@ -132,18 +133,17 @@ Seven steps, piped as an LCEL chain, each wrapped by `step()` (trace entry +
 `CHAIN_STEP_DELAY_SEC` pause):
 
 1. `fetch_url` — atomic `UPDATE ... status='scraping'` claim; already-summarized → skip
-2. `login` — `scraper.ensure_session`: opens the URL, reuses a live session, drives the auth wall only if one appears
-3. `open_page` — `scraper.open_page`: verifies the page is really up. 3.1 wait/re-probe/re-navigate · 3.2 bounced to IdP → one re-auth · 3.3 fail
-4. `extract` — `scraper.extract_note` / `extract_community`; blobs persisted here so steps 5–7 never carry bytes
+2. `login` — browser: `scraper.ensure_session` reuses a live session, drives the auth wall only if one appears. api: no-op, the endpoint is public
+3. `open_page` — browser: `scraper.open_page` verifies the page is up (3.1 wait/re-probe/re-navigate · 3.2 bounced to IdP → one re-auth · 3.3 fail). api: `community_api.fetch_thread`, then skip unanswered threads before any LLM spend
+4. `extract` — browser: `scraper.extract_note`. api: render the thread, download images by URL. Blobs persisted here so steps 5–7 never carry bytes
 5. `summarize` — `PromptTemplate | ChatOpenAI | JsonOutputParser` against the `NoteSummary` pydantic schema
 6. `embed` — `build_blob()` → Titan; a failure here is non-fatal (backfill catches it)
 7. `persist` — summary row + embedding row + URL status + run log
 
 Rules that keep it one flow:
 
-- **Both sources run this chain and both sign in.** `SOURCES["notes"|"community"]` is the only branch: table names, `login_url`, `extractor`, `blob_col`, `target`, retries, `min_chars`, `allow_skip`. Don't add a second ingest path — add a `SOURCES` entry.
-- **`login_url` decides where step 2 signs in.** Notes: `None` — sign in on the note URL itself, so an already-signed-in run costs no extra page load. Community: the Khoros login URL, which hands off to `accounts.sap.com` (the same IdP, the same S-user) and redirects straight back when a session exists. Because that lands elsewhere, step 3 navigates to the thread itself (`navigate=bool(login_url)`).
-- **`target` decides what "arrived" means.** `"note"` requires the Symptom/Resolution classifier to fire. `"content"` requires a rendered page whose URL still carries the `-p/<id>` we asked for — a forum thread never matches the note classifier, and the id check catches sign-in bounces and redirect shells.
+- **Notes use the browser; community uses the Khoros public API.** `SOURCES[source]["reader"]` is the only branch. community.sap.com is Cloudflare-fronted and a headless browser on a datacenter IP gets a *managed* challenge it cannot clear — the API answers anonymously and gives more (every message, `is_solution`, `conversation.solved`, image URLs that fetch with a plain GET). Don't add a second ingest path — add a `SOURCES` entry.
+- **Never reintroduce a browser login for community.** The login page is the most heavily protected endpoint on that host; navigating to it is what produced the permanent challenge loop.
 - **One exit.** Steps raise `ChainAbort(error, status, action)`; `_finish()` is the sole place that writes URL status, the run log, and deletes orphan blobs. Never write those inline in a step.
 - **`_requeue_status()` decides burn vs retry.** Environment failures (MFA, expired session, probe/navigate failure, `cloudflare_challenge`, `page_not_reached`) send the URL back to `pending`; content failures mark it `failed`.
 - **`BROWSER_LOCK` is held across steps 2–4 only** — acquired in `login`, released at the end of `extract`, so the LLM step doesn't block a credential test-login.
@@ -163,13 +163,17 @@ feed `build_blob()`. Changing that blob invalidates every stored `content_hash` 
 
 ### Scraping
 
-`services/scraper.py` drives **OpenClaw** (headless Chrome) and exposes primitives, not
-workflows: `ensure_session`, `open_page`, `extract_note`, `extract_community`,
+`services/scraper.py` drives **OpenClaw** (headless Chrome) for SAP Notes only and
+exposes primitives, not workflows: `ensure_session`, `open_page`, `extract_note`,
 `is_challenge`, plus `test_login` for the credentials UI. The page state machine (`_probe` → `classify` →
 `_act`) is unchanged; only the orchestration moved into the chain.
 
-Community pages go through the same browser and the same S-user login as the notes —
-there is one Chrome, one `BROWSER_LOCK`, and one credential.
+Community pages do **not** touch the browser — see `services/community_api.py`.
+
+`_clear_session()` wipes every cookie, including Cloudflare's `cf_clearance`.
+`ensure_session` claims `_last_account` immediately after clearing, not on success:
+setting it on success let a failing account re-clear on every attempt, which made
+recovery impossible by construction.
 
 SAP credentials come from the `credentials` table (password Fernet-encrypted via
 `services/crypto.py`). Blobs (community images, note attachments) go through

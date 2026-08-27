@@ -3,16 +3,20 @@
 One LCEL chain, eight steps, one failure path:
 
   1 fetch_url         claim the next pending URL (atomic)
-  2 login             open it and clear the auth wall, or reuse the live session
-  3 open_page         verify the page is really on screen  (3.1 retry / 3.2 re-auth / 3.3 fail)
-  4 extract           pull the article text + attachments/images
+  2 login             browser: clear the auth wall or reuse the session. api: no-op
+  3 open_page         browser: verify the page is up (3.1 retry / 3.2 re-auth / 3.3 fail)
+                      api: fetch the thread and check it came back
+  4 extract           browser: article text + attachments. api: render the thread,
+                      download its images
   4b describe_images  community only: vision caption + OCR (no-op on notes / when off)
   5 summarize         PromptTemplate | ChatOpenAI | JsonOutputParser  → NoteSummary
   6 embed             build the retrieval blob and vectorize it
   7 persist           write summary + embedding + url status + run log
 
-Both sources (SAP notes, SAP Community) run this chain; `source` decides which
-tables it reads and writes and whether step 2 needs credentials.
+Both sources run this chain; SOURCES[source]["reader"] picks how steps 2-4 get the
+content. Notes use the signed-in browser. Community uses the Khoros public API —
+community.sap.com is Cloudflare-fronted and a headless browser on a datacenter IP
+gets a managed challenge it cannot clear, while the API answers anonymously.
 
 Cron lives outside, in services/scheduler.py. Nothing else drives ingest.
 """
@@ -33,9 +37,7 @@ from pydantic import BaseModel, Field
 
 from config import (
     CHAIN_STEP_DELAY_SEC,
-    COMMUNITY_MIN_CHARS,
-    COMMUNITY_PAGE_RETRIES,
-    COMMUNITY_LOGIN_URL,
+    COMMUNITY_REQUIRE_ANSWER,
     SUMMARIZE_MAX_INPUT_CHARS,
     SUMMARIZE_MAX_TOKENS,
     SUMMARIZE_TEMPERATURE,
@@ -59,6 +61,8 @@ SOURCES = {
         "urls_table": "urls",
         "summaries_table": "summaries",
         "log_table": "scrape_log",
+        # Signed-in browser: the note wall is behind accounts.sap.com.
+        "reader": "browser",
         # Sign in on the target URL itself: an already-signed-in run costs no extra load.
         "login_url": None,
         "extractor": "note",
@@ -72,13 +76,14 @@ SOURCES = {
         "urls_table": "community_urls",
         "summaries_table": "community_summaries",
         "log_table": "community_scrape_log",
-        # Khoros hands off to accounts.sap.com — the same IdP, the same S-user.
-        "login_url": COMMUNITY_LOGIN_URL,
-        "extractor": "community",
+        # Read through the Khoros public API: no browser, so no Cloudflare wall.
+        "reader": "api",
+        "login_url": None,
+        "extractor": None,
         "blob_col": "images",
-        "target": "content",     # a forum thread never matches the note classifier
-        "page_retries": COMMUNITY_PAGE_RETRIES,
-        "min_chars": COMMUNITY_MIN_CHARS,
+        "target": None,
+        "page_retries": None,
+        "min_chars": 0,
         "allow_skip": True,      # community pages are often blogs, not solutions
     },
 }
@@ -232,19 +237,19 @@ async def fetch_url(state: dict) -> dict:
 async def login(state: dict) -> dict:
     """Sign in (or reuse a live session) before the page is opened.
 
-    Notes sign in on the target URL itself. Community signs in on the Khoros login
-    URL, which redirects straight back when a session already exists — so step 3
-    navigates to the thread afterwards.
+    API sources have nothing to sign in to — the endpoint is public.
     """
     cfg, url = state["cfg"], state["url"]
+
+    if cfg["reader"] == "api":
+        _rec(state, "login", "ok", "Public API — no sign-in needed")
+        return state
+
     await _acquire_browser(state)
-
     cred = state.get("cred")
-    username = cred["username"] if cred else None
-    password = state.get("password")
-
     result = await asyncio.to_thread(
-        scraper.ensure_session, cfg["login_url"] or url["source_url"], username, password)
+        scraper.ensure_session, cfg["login_url"] or url["source_url"],
+        cred["username"] if cred else None, state.get("password"))
     state["trace"].extend(result.get("trace") or [])
     if not result["ok"]:
         raise ChainAbort(result["error"], status=_requeue_status(result["error"]), action="login")
@@ -258,9 +263,29 @@ async def login(state: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 async def open_page(state: dict) -> dict:
+    """Confirm we actually have the content — a rendered page, or a thread from the API."""
     cfg, url = state["cfg"], state["url"]
-    cred = state.get("cred")
 
+    if cfg["reader"] == "api":
+        from services.community_api import fetch_thread
+        thread = await fetch_thread(url["source_url"])
+        if not thread["ok"]:
+            # An unreachable API is an environment failure; a dead thread is not.
+            status = "pending" if thread["error"].startswith("api_unreachable") else "failed"
+            _rec(state, "open_page", "error", "Thread not retrieved", thread["error"])
+            raise ChainAbort(thread["error"], status=status, action="open")
+        state["thread"] = thread
+        _rec(state, "open_page", "ok",
+             f"Thread retrieved — {thread['message_count']} message(s)",
+             f"solved={thread['solved']} board={thread['board']} {len(thread['text'])} chars")
+
+        # A question nobody answered carries no fix. Skip before paying for an LLM call.
+        if COMMUNITY_REQUIRE_ANSWER and not thread["answered"]:
+            raise ChainAbort("No replies — the thread holds no answer",
+                             status="skipped", action="skip")
+        return state
+
+    cred = state.get("cred")
     result = await asyncio.to_thread(
         scraper.open_page,
         url["source_url"],
@@ -281,8 +306,44 @@ async def open_page(state: dict) -> dict:
 # Step 4 — extract
 # ---------------------------------------------------------------------------
 
+async def _extract_api(state: dict) -> dict:
+    """Render the fetched thread and pull its images down by URL."""
+    from services.community_api import download_image
+    from services.image_store import save as blob_save
+
+    thread = state["thread"]
+    state["article"] = thread["text"]
+    state["scraped_title"] = thread["title"]
+    state["solved"] = thread["solved"]
+
+    briefs, images = [], {}
+    for im in thread["images"]:
+        data, ext = await download_image(im["url"])
+        if not data:
+            continue
+        try:
+            key = await asyncio.to_thread(blob_save, data, ext or "png")
+        except Exception as e:
+            logger.warning("community image save failed: %s", e)
+            continue
+        finally:
+            del data
+        briefs.append({"ref": im["ref"], "context": "", "alt": im.get("alt", "")})
+        images[im["ref"]] = {"key": key, "alt": im.get("alt", "")}
+
+    state["image_briefs"] = briefs
+    state["images"] = images
+    _rec(state, "extract", "ok", f"Thread rendered — {len(thread['text'])} chars",
+         f"{len(images)}/{len(thread['images'])} image(s) stored")
+    state.pop("thread", None)
+    return state
+
+
 async def extract(state: dict) -> dict:
     cfg = state["cfg"]
+    if cfg["reader"] == "api":
+        return await _extract_api(state)
+
     extractor = getattr(scraper, f"extract_{cfg['extractor']}")
     result = await asyncio.to_thread(extractor)
     state["trace"].extend(result.get("trace") or [])
@@ -295,37 +356,17 @@ async def extract(state: dict) -> dict:
     # Persist blobs now so the LLM step never carries bytes. Orphans are cleaned on abort.
     from services.image_store import save as blob_save
 
-    if cfg["blob_col"] == "attachments":
-        manifest = []
-        for a in result.get("attachments") or []:
-            try:
-                key = await asyncio.to_thread(blob_save, a["data"], a.get("ext", "bin"), "doc")
-                manifest.append({"name": a["name"], "key": key, "ext": a.get("ext", "")})
-            except Exception as e:
-                logger.warning(f"  ⚠️ attachment save failed ({a.get('name')}): {e}")
-        state["attachments"] = manifest
-        if manifest:
-            _rec(state, "attachments", "ok", f"Saved {len(manifest)} attachment(s)",
-                 ", ".join(a["name"] for a in manifest))
-    else:
-        briefs, images = [], {}
-        for im in result.get("images") or []:
-            b64 = im.pop("data_b64", None) or ""
-            if not b64:
-                continue
-            try:
-                key = await asyncio.to_thread(blob_save, base64.b64decode(b64), im.get("ext", "png"))
-            except Exception as e:
-                logger.warning(f"  ⚠️ community image save failed: {e}")
-                continue
-            finally:
-                del b64
-            briefs.append({"ref": im["ref"], "context": im.get("context", ""), "alt": im.get("alt", "")})
-            images[im["ref"]] = {"key": key, "alt": im.get("alt", "")}
-        state["image_briefs"] = briefs
-        state["images"] = images
-        if images:
-            _rec(state, "images", "ok", f"Saved {len(images)} image(s)", ", ".join(images))
+    manifest = []
+    for a in result.get("attachments") or []:
+        try:
+            key = await asyncio.to_thread(blob_save, a["data"], a.get("ext", "bin"), "doc")
+            manifest.append({"name": a["name"], "key": key, "ext": a.get("ext", "")})
+        except Exception as e:
+            logger.warning(f"  ⚠️ attachment save failed ({a.get('name')}): {e}")
+    state["attachments"] = manifest
+    if manifest:
+        _rec(state, "attachments", "ok", f"Saved {len(manifest)} attachment(s)",
+             ", ".join(a["name"] for a in manifest))
 
     result.clear()
     _release_browser(state)   # browser work is done — steps 5-7 are LLM + DB
@@ -368,20 +409,23 @@ _MIME = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
 
 async def describe_images(state: dict) -> dict:
     """Community only. Notes return immediately. Vision miss is non-fatal."""
-    if state.get("source") != "community":
-        return state
     briefs = state.get("image_briefs") or []
     images = state.get("images") or {}
     if not briefs:
         return state
-    from services.vision import active_provider, describe as vision_describe
+    from services.vision import (active_provider, describe as vision_describe,
+                                 provider_backoff_left)
     if await active_provider() == "off":
         _rec(state, "describe_images", "info", "Vision off — text placement only")
         return state
 
     from services.image_store import read as blob_read
-    n_ok = 0
+    n_ok, attempted = 0, 0
     for brief in briefs:
+        # One dead provider must not cost one timeout per image.
+        if provider_backoff_left():
+            break
+        attempted += 1
         meta = images.get(brief.get("ref") or "") or {}
         key = meta.get("key") or ""
         data = await asyncio.to_thread(blob_read, key) if key else None
@@ -399,8 +443,16 @@ async def describe_images(state: dict) -> dict:
             brief["ocr_text"] = out.get("ocr_text") or ""
             brief["kind"] = out.get("kind") or ""
             n_ok += 1
-    _rec(state, "describe_images", "ok" if n_ok else "info",
-         f"Described {n_ok}/{len(briefs)} image(s)")
+
+    skipped = len(briefs) - attempted
+    if skipped:
+        _rec(state, "describe_images", "warn",
+             f"Described {n_ok}/{len(briefs)} — vision provider down",
+             f"{skipped} image(s) skipped; retry in {provider_backoff_left()}s. "
+             "Text placement still applied.")
+    else:
+        _rec(state, "describe_images", "ok" if n_ok else "info",
+             f"Described {n_ok}/{len(briefs)} image(s)")
     return state
 
 
@@ -420,13 +472,23 @@ async def summarize(state: dict) -> dict:
     if len(state["article"]) > SUMMARIZE_MAX_INPUT_CHARS:
         article += "\n\n[Text truncated — original was longer]"
 
+    # The API states outright whether the thread has an accepted answer — hand that
+    # over rather than making the model infer it from prose.
+    context = ""
+    if state.get("solved") is not None:
+        context = ("\nTHREAD STATUS: an answer on this thread is marked as the accepted "
+                   "solution." if state["solved"] else
+                   "\nTHREAD STATUS: no answer is marked as accepted. Summarize only if a "
+                   "reply still gives a concrete fix; otherwise set is_solution to false.")
+    context += _image_context(briefs)
+
     _rec(state, "summarize", "info", "Sending article to LLM", f"{len(article)} chars")
     try:
         data = await _summarize_chain.ainvoke({
             "article": article,
             "family_catalog": await catalog_for_llm(),
             "extra_rules": extra_rules,
-            "extra_context": _image_context(briefs),
+            "extra_context": context,
         })
     except Exception as e:
         _rec(state, "summarize", "error", "LLM summarization failed", str(e))
@@ -694,9 +756,8 @@ async def _drain() -> None:
                                MAX_CONSECUTIVE_STALLS)
                 if stalls >= MAX_CONSECUTIVE_STALLS:
                     logger.error("community drain stopping: %d requeues in a row (%s). "
-                                 "The browser is not reaching the site — check the "
-                                 "SAP session and whether Cloudflare is challenging "
-                                 "this host.", stalls, result["error"])
+                                 "The Khoros API is not answering — check network "
+                                 "egress from this host.", stalls, result["error"])
                     break
             else:
                 stalls = 0
@@ -760,9 +821,11 @@ if __name__ == "__main__":
     # Both sources must name real tables and a real extractor.
     for name, cfg in SOURCES.items():
         assert cfg["urls_table"] and cfg["summaries_table"] and cfg["log_table"]
-        assert hasattr(scraper, f"extract_{cfg['extractor']}")
+        assert cfg["reader"] in ("browser", "api")
         assert cfg["blob_col"] in ("attachments", "images")
-        assert cfg["target"] in ("note", "content")
+        if cfg["reader"] == "browser":
+            assert hasattr(scraper, f"extract_{cfg['extractor']}")
+            assert cfg["target"] in ("note", "content")
 
     # The chain must be all eight steps, in order. Notes no-op 4b.
     assert [s.name for s in CHAIN.steps] == [
@@ -832,6 +895,7 @@ if __name__ == "__main__":
 
     _vision.describe = _count_describe
     _vision.active_provider = _provider_off
+    _vision.provider_backoff_left = lambda: 0
 
     globals()["CHAIN_STEP_DELAY_SEC"] = 0
     result = asyncio.run(run("notes"))
@@ -848,10 +912,33 @@ if __name__ == "__main__":
     assert scraper.BROWSER_LOCK.acquire(blocking=False)
     scraper.BROWSER_LOCK.release()
 
-    # Community: same login, different tables, images instead of attachments.
-    scraper.extract_community = lambda: {"ok": True, "raw_text": "raw", "clean_text": "clean",
-                                         "title": "C", "images": [], "error": "", "trace": []}
-    scraper._navigate = lambda u, t=30: (True, "")
+    # Community: read through the API, images downloaded by URL. The browser must
+    # not be touched at all — any call into scraper here is a regression.
+    import services.community_api as _capi
+
+    async def fake_thread(_url):
+        return {"ok": True, "source_id": "14444408", "title": "C", "solved": True,
+                "answered": True, "board": "technology-questions", "message_count": 2,
+                "text": "TITLE: C\n\nQUESTION by a:\nboom\n\nACCEPTED SOLUTION by b:\nfix it",
+                "images": [{"ref": "image_1", "url": "https://c/i.png", "alt": ""}],
+                "error": ""}
+
+    async def fake_download(_url):
+        return b"\x89PNG-bytes", "png"
+
+    _capi.fetch_thread = fake_thread
+    _capi.download_image = fake_download
+    import services.image_store as _store
+    _store.save = lambda data, ext, kind="img": f"img/stub.{ext}"
+    _store.delete = lambda key: None
+    _store.read = lambda key: b"\x89PNG-bytes"
+
+    def _no_browser(*_a, **_k):
+        raise AssertionError("community must never touch the browser")
+
+    scraper.ensure_session = _no_browser
+    scraper.open_page = _no_browser
+    scraper._navigate = _no_browser
     sql_log.clear()
     result = asyncio.run(run("community"))
     assert result["status"] == "completed", result
@@ -859,6 +946,32 @@ if __name__ == "__main__":
     assert "INSERT INTO community_summaries" in written and "images" in written
     assert "attachments" not in written
     assert "INSERT INTO community_scrape_log" in written
+
+    # An unanswered thread costs no LLM call.
+    async def lonely_thread(_url):
+        t = await fake_thread(_url)
+        return {**t, "answered": False, "message_count": 1}
+
+    _capi.fetch_thread = lonely_thread
+    sql_log.clear()
+    result = asyncio.run(run("community"))
+    assert result["status"] == "skipped" and "No replies" in result["error"], result
+    assert "INSERT INTO community_summaries" not in " || ".join(s for s, _ in sql_log)
+    _capi.fetch_thread = fake_thread
+
+    # An unreachable API requeues; a missing thread does not.
+    async def dead_api(_url):
+        return {"ok": False, "error": "api_unreachable: timeout"}
+
+    _capi.fetch_thread = dead_api
+    assert asyncio.run(run("community"))["status"] == "pending"
+
+    async def gone(_url):
+        return {"ok": False, "error": "not_found"}
+
+    _capi.fetch_thread = gone
+    assert asyncio.run(run("community"))["status"] == "failed"
+    _capi.fetch_thread = fake_thread
 
     # A blog must be skipped, not stored.
     class SkipChain:
@@ -873,21 +986,52 @@ if __name__ == "__main__":
     assert "INSERT INTO community_summaries" not in written
     assert "status=?" in written  # url row marked skipped through the one exit
 
-    # A Cloudflare challenge must requeue the URL, never store or "skip" it.
+    # A Cloudflare challenge on the BROWSER source must requeue, never store or skip.
     globals()["_summarize_chain"] = FakeChain()
+    scraper.ensure_session = lambda u, n=None, p=None: {
+        "ok": True, "state": "target", "mode": "reused_session", "error": "", "trace": []}
     scraper.open_page = lambda u, n=None, p=None, r=None, t="note", nav=False, mc=200: {
         "ok": False, "state": "challenge", "error": "cloudflare_challenge", "trace": []}
     sql_log.clear()
-    result = asyncio.run(run("community"))
+    result = asyncio.run(run("notes"))
     assert result["status"] == "pending", result          # requeued, not burned
     assert result["error"] == "cloudflare_challenge", result
     written = " || ".join(sql for sql, _ in sql_log)
-    assert "INSERT INTO community_summaries" not in written
+    assert "INSERT INTO summaries" not in written
     assert "requeued" in json.dumps([p for _, p in sql_log])
 
-    # Both sources must sign in — a run without credentials still reaches step 2.
-    assert SOURCES["notes"]["login_url"] is None          # signs in on the note URL
-    assert SOURCES["community"]["login_url"].startswith("https://community.sap.com")
+    # Notes sign in on the note URL; community has nothing to sign in to.
+    assert SOURCES["notes"]["reader"] == "browser" and SOURCES["notes"]["login_url"] is None
+    assert SOURCES["community"]["reader"] == "api"
+
+    # A downed vision provider must cost ONE call, not one per image. This is the
+    # bug that made a screenshot-heavy thread take minutes: every image paid the
+    # full VISION_TIMEOUT before failing the same way.
+    down = {"after": 1, "calls": 0}
+
+    async def _describe_then_die(*_a, **_k):
+        down["calls"] += 1
+        return {"caption": "", "ocr_text": "", "kind": ""}
+
+    async def _provider_on():
+        return "gemini"
+
+    _vision.describe = _describe_then_die
+    _vision.active_provider = _provider_on
+    _vision.provider_backoff_left = lambda: 0 if down["calls"] < down["after"] else 300
+
+    img_state = {
+        "source": "community", "trace": [],
+        "image_briefs": [{"ref": f"image_{i}"} for i in range(1, 6)],
+        "images": {f"image_{i}": {"key": f"img/{i}.png"} for i in range(1, 6)},
+    }
+    import services.image_store as _store2
+    _store2.read = lambda key: b"bytes"
+    asyncio.run(describe_images(img_state))
+    assert down["calls"] == 1, f"vision called {down['calls']}× for 5 images — breaker dead"
+    last = img_state["trace"][-1]
+    assert "provider down" in last["message"], last
+    assert "4 image(s) skipped" in (last["detail"] or ""), last
 
     # A drain whose every run requeues must STOP, not spin on the same pending row.
     import config as _cfg
@@ -909,5 +1053,5 @@ if __name__ == "__main__":
     assert calls["n"] == MAX_CONSECUTIVE_STALLS, f"stopped after {calls['n']} runs"
     assert _draining is False
 
-    print("✅ ingest_chain self-check passed "
-          "(stubbed runs: notes, community, blog-skip, cloudflare requeue, stall guard)")
+    print("✅ ingest_chain self-check passed (stubbed runs: notes, community via API, "
+          "blog-skip, no-replies skip, api-down requeue, cloudflare requeue, stall guard)")
