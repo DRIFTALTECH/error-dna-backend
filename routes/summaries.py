@@ -229,7 +229,7 @@ class ChatBody(BaseModel):
 
 @router.post("/summaries/{summary_id}/chat")
 async def chat_summary(summary_id: int, body: ChatBody):
-    from services.summarizer import chat
+    from services.llm import chat
     rows = await read("SELECT * FROM summaries WHERE id = ?", (summary_id,))
     if not rows:
         raise HTTPException(404, "Summary not found")

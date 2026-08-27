@@ -14,7 +14,7 @@ import time
 import logging
 from datetime import datetime, timezone, timedelta
 
-from config import PREFERRED_SUSER
+from config import CHAIN_PAGE_RETRIES, PREFERRED_SUSER
 
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -23,6 +23,8 @@ MAX_STEPS = 18          # hard cap so a redirect loop can't spin forever
 STEP_COOLDOWN = 5       # openclaw cooldown after each browser command
 MAX_LOADING_WAITS = 6   # extra probes to allow while a page is still rendering
 NAV_RETRIES = 3         # openclaw navigate is flaky under load — retry before failing
+CHALLENGE_WAITS = 12    # probes to allow while a Cloudflare interstitial clears
+CHALLENGE_WAIT_SEC = 5  # pause between those probes
 
 # One Chrome / one openclaw gateway: notes scraper, community ingest, and
 # credential test-login must never interleave browser commands.
@@ -36,6 +38,33 @@ def _ts() -> str:
 # Placeholder/skeleton markers — a page that shows these hasn't rendered yet.
 _LOADING_KW = ("not shown", "please wait", "loading…", "loading...", "just a moment",
                "header title", "header subtitle")
+
+# Cloudflare bot-verification. Two variants and the old code only knew the first:
+# the no-JS page says "Just a moment...", but the JS-rendered Turnstile page says
+# "Verify you are human", carries a Ray ID, and sets its heading to the bare
+# hostname — ~200-300 chars that read as a fully rendered page. That is how a
+# challenge used to sail through as "Page rendered" and reach the LLM as content.
+_CHALLENGE_KW = (
+    "verify you are human", "verifying you are human",
+    "needs to review the security of your connection",
+    "enable javascript and cookies to continue",
+    "checking your browser before accessing",
+    "performance & security by cloudflare",
+    "ray id:", "cf-ray", "just a moment",
+    "attention required! | cloudflare",
+)
+
+
+def is_challenge(sig: dict) -> bool:
+    """True if this page is a bot-verification interstitial, not the site."""
+    lc = (sig.get("lc", "") or "")
+    head = (sig.get("heading", "") or "").strip().lower()
+    if any(k in lc for k in _CHALLENGE_KW):
+        return True
+    # Turnstile sets the heading to the bare hostname over a very short body.
+    if head and "." in head and " " not in head and sig.get("len", 0) < 600:
+        return True
+    return False
 
 
 def _looks_loading(sig: dict) -> bool:
@@ -99,7 +128,7 @@ def _clear_session() -> None:
     _run(["cookies", "clear"], timeout=15)
 
 
-# Account of the last successful login. When scrape_note is handed a DIFFERENT
+# Account of the last successful login. When ensure_session is handed a DIFFERENT
 # account (e.g. after /rotate), we clear the persisted session so it logs in fresh
 # as the new account instead of riding the old "keep me signed in" cookie.
 # ponytail: process-global, resets on restart. On restart _last_account=None so the
@@ -161,16 +190,6 @@ _ACCT_KW = ("account selection", "choose an account", "select an account", "choo
             "which account", "pick an account", "use another account")
 _LANDING_KW = ("say hello", "digital companion", "sap for me")
 _TARGET_KW = ("symptom", "resolution")
-
-
-def _is_login(text: str) -> bool:
-    """Kept for callers/tests: does this text look like an auth wall, not content?"""
-    t = (text or "").lower()
-    if any(k in t for k in ("sign in", "email, user id", "forgot password", "keep me signed in", "account selection")):
-        return True
-    if "sap for me" in t and len(text or "") < 300:
-        return True
-    return False
 
 
 def classify(sig: dict) -> str:
@@ -308,105 +327,238 @@ _STATE_MSG = {
 }
 
 
-def _drive_to_content(url: str, username: str, password: str) -> tuple[bool, str, str, list]:
-    """Loop probe→classify→act until the target article is on screen.
+# ---- chain step primitives ------------------------------------------------
+# One Chrome, one openclaw gateway: the ingest chain holds BROWSER_LOCK across
+# steps 2-4 so a credential test-login can never interleave mid-run.
+BROWSER_LOCK = _BROWSER_LOCK
 
-    Returns (ok, text, error, trace). ok=False carries a machine-readable error:
-    mfa_required / needs_login (no creds) / stuck:<state> / probe_failed / max_steps.
-    `trace` is an ordered list of {at, phase, status, message, detail} steps for the UI.
-    """
+# Pages that mean "you are not through the auth wall yet".
+LOGIN_STATES = ("landing", "login_user", "login_pass", "account_select", "keep_signed", "consent")
+
+
+def _tracer() -> tuple[list, callable]:
     trace: list = []
 
     def rec(phase, status, message, detail=None):
         trace.append({"at": _ts(), "phase": phase, "status": status,
                       "message": message, "detail": detail})
 
-    last = None
-    repeats = 0
-    loading_waits = 0
-    for step in range(MAX_STEPS):
+    return trace, rec
+
+
+def _probe_retrying(rec, tries: int = 3) -> dict | None:
+    """Probe, tolerating a mid-navigation frame that returns nothing."""
+    for attempt in range(tries):
         sig = _probe()
+        if sig is not None:
+            return sig
+        rec("probe", "warn", f"Probe returned nothing (attempt {attempt + 1}/{tries})")
+        time.sleep(4)
+    return None
+
+
+def _detail(sig: dict) -> str:
+    snippet = (sig.get("lc", "")[:120]).replace("\n", " ").strip()
+    cururl = sig.get("url", "")
+    return f"url={cururl} len={sig.get('len')} · {snippet}" if cururl else f"len={sig.get('len')} · {snippet}"
+
+
+def ensure_session(url: str, username: str = None, password: str = None) -> dict:
+    """Step 2 — open `url` and clear whatever auth wall appears. Reuses a live session.
+
+    Navigating to the target directly means an already-signed-in run costs zero extra
+    page loads; only a bounce to the IdP triggers the login states.
+
+    Returns {ok, state, mode, error, trace}. mode is 'reused_session' | 'logged_in'.
+    error is machine-readable: navigate_failed / probe_failed / mfa_required /
+    needs_login / stuck:<state>.
+    """
+    global _last_account
+    trace, rec = _tracer()
+
+    # Account changed since the last login (rotate) → drop the old cookie so we
+    # sign in as the NEW account instead of riding "keep me signed in".
+    if username and _last_account is not None and username != _last_account:
+        _clear_session()
+        rec("session", "info", "Account switched — cleared persisted session", username)
+
+    nav_ok, nav_out = _navigate(url, timeout=30)
+    rec("navigate", "ok" if nav_ok else "error",
+        f"Opened {url}" if nav_ok else "Navigate command failed",
+        None if nav_ok else (nav_out[:300] or "openclaw browser navigate returned non-zero"))
+    if not nav_ok:
+        return {"ok": False, "state": "unknown", "mode": None, "error": "navigate_failed", "trace": trace}
+    time.sleep(5)
+
+    last, repeats, waits, saw_login, challenges = None, 0, 0, False, 0
+
+    for step in range(MAX_STEPS):
+        sig = _probe_retrying(rec)
         if sig is None:
-            # Probes can miss a mid-navigation frame — retry twice with a pause.
-            rec("probe", "warn", f"Probe {step} returned nothing — retrying")
-            time.sleep(4)
-            sig = _probe() or (time.sleep(4) or _probe())
-            if sig is None:
-                rec("probe", "error", "Browser probe failed after retries",
-                    "openclaw returned no DOM — is the headless browser running/logged in?")
-                return False, "", "probe_failed", trace
+            rec("probe", "error", "Browser probe failed after retries",
+                "openclaw returned no DOM — is the headless browser running?")
+            return {"ok": False, "state": "unknown", "mode": None, "error": "probe_failed", "trace": trace}
 
         state = classify(sig)
-        snippet = (sig.get("lc", "")[:120]).replace("\n", " ").strip()
-        cururl = sig.get("url", "")
-        logger.info(f"  [step {step}] state={state} len={sig.get('len')} "
-                    f"tiles={len(sig.get('suserTiles', []))}")
-        detail = f"url={cururl} len={sig.get('len')} · {snippet}" if cururl else f"len={sig.get('len')} · {snippet}"
-
-        if state == "target":
-            # Guard against a stale-DOM race: during navigation the probe can still
-            # see the PREVIOUS note's content while the URL is already the login IdP.
-            # A real article is never on accounts.sap.com — wait it out.
-            if "accounts.sap.com" in (cururl or ""):
-                loading_waits += 1
-                rec("loading", "info", "Target-like content but still on login domain — waiting", detail)
-                if loading_waits <= MAX_LOADING_WAITS:
-                    time.sleep(5)
-                    continue
-            rec("extract", "ok", _STATE_MSG["target"], detail)
-            ok, text = _get_text()
-            # Page may still be settling when it first matches — retry a few times.
-            tries = 0
-            while (not ok or not text or len(text) < 100) and tries < 3:
-                tries += 1
-                rec("extract", "info", f"Content thin ({len((text or '').strip())} chars) — waiting (retry {tries})")
-                time.sleep(5)
-                ok, text = _get_text()
-            if ok and text and len(text.strip()) >= 100:
-                rec("done", "ok", f"Extracted {len(text)} chars")
-                return True, text, "", trace
-            rec("done", "error", "Extraction failed — page matched but content too thin", detail)
-            return False, "", "extraction_failed", trace
+        detail = _detail(sig)
+        logger.info(f"  [login {step}] state={state} len={sig.get('len')}")
 
         if state == "mfa":
             rec("mfa", "error", _STATE_MSG["mfa"], detail)
-            return False, "", "mfa_required", trace
+            return {"ok": False, "state": state, "mode": None, "error": "mfa_required", "trace": trace}
 
-        needs_creds = state in ("landing", "login_user", "login_pass")
-        if needs_creds and (not username or not password):
-            rec("login", "error", "Login required but no credentials for this account", detail)
-            return False, "", "needs_login", trace
-
-        # Still-rendering skeleton — wait it out instead of calling it stuck.
-        if state == "unknown" and _looks_loading(sig):
-            loading_waits += 1
-            rec("loading", "info", f"Page still rendering (wait {loading_waits}/{MAX_LOADING_WAITS})", detail)
-            if loading_waits <= MAX_LOADING_WAITS:
-                time.sleep(6)
+        # Cloudflare interstitial. A real browser clears it on its own within a few
+        # seconds; we only wait, never touch the widget.
+        if is_challenge(sig):
+            challenges += 1
+            rec("challenge", "info",
+                f"Bot verification — waiting for it to clear ({challenges}/{CHALLENGE_WAITS})", detail)
+            if challenges <= CHALLENGE_WAITS:
+                time.sleep(CHALLENGE_WAIT_SEC)
                 continue
-            rec("done", "error", "Page never finished loading", detail)
-            return False, "", f"stuck:loading:{snippet}", trace
+            rec("challenge", "error", "Bot verification never cleared", detail)
+            return {"ok": False, "state": "challenge", "mode": None,
+                    "error": "cloudflare_challenge", "trace": trace}
 
-        if state == "unknown":
-            repeats += 1
-            rec("unknown", "warn", f"Unrecognized page (attempt {repeats})", detail)
-            if repeats >= 3:
-                return False, "", f"stuck:{snippet}", trace
-            time.sleep(5)
-            continue
+        if state not in LOGIN_STATES:
+            # Still-rendering skeleton is not a state to act on — wait it out.
+            if state == "unknown" and _looks_loading(sig):
+                waits += 1
+                rec("loading", "info", f"Page still rendering (wait {waits}/{MAX_LOADING_WAITS})", detail)
+                if waits <= MAX_LOADING_WAITS:
+                    time.sleep(6)
+                    continue
+                rec("login", "error", "Page never finished loading", detail)
+                return {"ok": False, "state": state, "mode": None, "error": "stuck:loading", "trace": trace}
+            # Past the wall (article, or some other authenticated page) — step 3 judges.
+            mode = "logged_in" if saw_login else "reused_session"
+            if username:
+                _last_account = username
+            rec("login", "ok",
+                "Signed in" if saw_login else "Existing session reused — no login needed", detail)
+            return {"ok": True, "state": state, "mode": mode, "error": "", "trace": trace}
 
-        # Loop guard: same actionable state 3× running = we're not advancing.
+        saw_login = True
+        if not username or not password:
+            rec("login", "error", "Login required but no credentials for this account", detail)
+            return {"ok": False, "state": state, "mode": None, "error": "needs_login", "trace": trace}
+
+        # Loop guard: same actionable state 3× running = we are not advancing.
         repeats = repeats + 1 if state == last else 0
         last = state
         if repeats >= 3:
-            rec("done", "error", f"Stuck on '{state}' — not advancing", detail)
-            return False, "", f"stuck:{state}", trace
+            rec("login", "error", f"Stuck on '{state}' — not advancing", detail)
+            return {"ok": False, "state": state, "mode": None, "error": f"stuck:{state}", "trace": trace}
 
         rec(state, "ok", _STATE_MSG.get(state, f"Handling {state}"), detail)
         _act(state, username, password)
 
-    rec("done", "error", "Gave up after max steps", f"MAX_STEPS={MAX_STEPS}")
-    return False, "", "max_steps", trace
+    rec("login", "error", "Gave up after max steps", f"MAX_STEPS={MAX_STEPS}")
+    return {"ok": False, "state": last or "unknown", "mode": None, "error": "max_steps", "trace": trace}
+
+
+def open_page(url: str, username: str = None, password: str = None,
+              retries: int = None, target: str = "note",
+              navigate: bool = False, min_chars: int = 200) -> dict:
+    """Step 3 — confirm the page we want is actually on screen.
+
+    3.1 thin / still-rendering / bot check → wait, re-probe, re-navigate near the end.
+    3.2 bounced back to a login            → re-run step 2 once, then re-verify.
+    3.3 still not there                    → fail with a machine-readable error.
+
+    target="note"    the note-article classifier must fire (Symptom/Resolution).
+    target="content" any rendered page whose URL still carries the id we asked for
+                     — a forum thread never matches the note classifier.
+    navigate=True    load `url` first; the login step landed us somewhere else.
+
+    Returns {ok, state, error, trace}.
+    """
+    if retries is None:
+        retries = CHAIN_PAGE_RETRIES
+    trace, rec = _tracer()
+    relogins = 0
+    challenges = 0
+
+    # The id in .../-p/<id>: proof we are on the page we asked for, not a redirect.
+    _, _sep, _tail = url.rstrip("/").rpartition("-p/")
+    want_id = _tail if _sep and _tail.isdigit() else ""
+
+    if navigate:
+        nav_ok, nav_out = _navigate(url, timeout=30)
+        rec("navigate", "ok" if nav_ok else "error",
+            f"Opened {url}" if nav_ok else "Navigate command failed",
+            None if nav_ok else (nav_out[:300] or None))
+        if not nav_ok:
+            return {"ok": False, "state": "unknown", "error": "navigate_failed", "trace": trace}
+        time.sleep(5)
+
+    for attempt in range(1, retries + 1):
+        sig = _probe_retrying(rec)
+        if sig is None:
+            rec("verify", "error", "Browser probe failed after retries")
+            return {"ok": False, "state": "unknown", "error": "probe_failed", "trace": trace}
+
+        state = classify(sig)
+        detail = _detail(sig)
+        cururl = sig.get("url", "") or ""
+
+        if state == "mfa":
+            rec("verify", "error", _STATE_MSG["mfa"], detail)
+            return {"ok": False, "state": state, "error": "mfa_required", "trace": trace}
+
+        # 3.2 — session died mid-run and we are back at the IdP.
+        if state in LOGIN_STATES:
+            if relogins >= 1:
+                rec("verify", "error", f"Bounced to login again ({state}) after re-auth", detail)
+                return {"ok": False, "state": state, "error": "session_expired", "trace": trace}
+            relogins += 1
+            rec("verify", "warn", f"Bounced to login ({state}) — re-authenticating", detail)
+            again = ensure_session(url, username, password)
+            trace.extend(again.get("trace") or [])
+            if not again["ok"]:
+                return {"ok": False, "state": again["state"], "error": again["error"], "trace": trace}
+            continue
+
+        # Bot verification — wait it out, never touch the widget.
+        if is_challenge(sig):
+            challenges += 1
+            rec("challenge", "info",
+                f"Bot verification — waiting for it to clear ({challenges}/{CHALLENGE_WAITS})", detail)
+            if challenges <= CHALLENGE_WAITS:
+                time.sleep(CHALLENGE_WAIT_SEC)
+                continue
+            rec("challenge", "error", "Bot verification never cleared", detail)
+            return {"ok": False, "state": "challenge", "error": "cloudflare_challenge", "trace": trace}
+
+        rendered = not _looks_loading(sig) and sig.get("len", 0) >= min_chars
+        # Stale-DOM race: the probe can still show the PREVIOUS article while the URL
+        # is already the IdP. A real article is never served from accounts.sap.com.
+        on_idp = "accounts.sap.com" in cururl
+        # For a thread, the id must still be in the URL — otherwise we were redirected
+        # (sign-in bounce, "topic moved", 404 shell) and are reading the wrong page.
+        right_page = (want_id in cururl) if (want_id and cururl) else True
+
+        if target == "note":
+            reached = state == "target" and not on_idp
+        else:
+            reached = rendered and not on_idp and right_page
+
+        if reached:
+            rec("verify", "ok", "Page open and rendered", detail)
+            return {"ok": True, "state": state, "error": "", "trace": trace}
+
+        # 3.1 — not there yet: wait, and re-navigate on the final attempt.
+        why = "wrong page after redirect" if not right_page else "not rendered yet"
+        rec("verify", "info", f"Page not ready — {why} (attempt {attempt}/{retries})", detail)
+        time.sleep(6)
+        if attempt == retries - 1:
+            rec("verify", "warn", "Re-navigating to the page")
+            _navigate(url, timeout=30)
+            time.sleep(5)
+
+    # 3.3
+    rec("verify", "error", "Page never reached", f"after {retries} attempts")
+    return {"ok": False, "state": "unknown", "error": "page_not_reached", "trace": trace}
 
 
 # Post-auth signals only. NOT consent — a cookie/privacy banner shows pre-login,
@@ -589,114 +741,77 @@ def _fetch_attachments() -> tuple[str, list]:
                 pass
 
 
-def scrape_note(url: str, username: str = None, password: str = None) -> dict:
-    """
-    Scrape a SAP note. Drives through login/account-select/consent as needed.
-    Also downloads + extracts attachment text (best-effort) and appends it.
-    Returns { success, raw_text, clean_text, title, error, trace, attachments }.
-    """
-    with _BROWSER_LOCK:
-        return _scrape_note_locked(url, username, password)
-
-
-def _scrape_note_locked(url: str, username: str = None, password: str = None) -> dict:
-    global _last_account
-    # Account changed since last login (rotate) → drop old session, force fresh login.
-    switched = bool(username) and username != _last_account
-    if switched and _last_account is not None:
-        _clear_session()
-
-    nav_ok, nav_out = _navigate(url, timeout=30)
-    time.sleep(5)
-    nav_step = [{"at": _ts(), "phase": "navigate",
-                 "status": "ok" if nav_ok else "error",
-                 "message": f"Opened {url}" if nav_ok else "Navigate command failed",
-                 "detail": None if nav_ok else (nav_out[:300] or "openclaw browser navigate returned non-zero")}]
-
-    ok, text, err, trace = _drive_to_content(url, username, password)
-    trace = nav_step + trace
-    if not ok:
-        # Preserve the old error vocabulary the scheduler/UI already understand.
-        mapped = {"needs_login": "session_expired"}.get(err, err)
-        logger.warning(f"  ⚠️ drive failed: {mapped}")
-        return {"success": False, "error": mapped, "trace": trace}
-
-    # Passed the login wall as this account — remember it so we only re-login on switch.
-    if username:
-        _last_account = username
-
-    if len(text) < 100:
-        trace.append({"at": _ts(), "phase": "done", "status": "error",
-                      "message": "Extracted text too short", "detail": f"{len(text)} chars"})
-        return {"success": False, "error": "too_short", "raw_text": text, "trace": trace}
-
-    # ---- extract sections from the raw text (unchanged) ----
-    lines = text.split("\n")
+def _parse_note_sections(text: str) -> tuple[str, str]:
+    """Raw article text → (title, clean_text). Section-based, chrome dropped."""
     title = ""
-    sections = {}
-    current = None
-    content = []
+    sections: dict = {}
+    current, content = None, []
+    _DROP = ("object status", "quality rating", "description", "products", "attributes",
+             "available languages", "rate this document", "see also")
 
-    for line in lines:
-        s = line.strip()
-        if s.startswith("3780") or s.startswith("377") or s.startswith("376"):
-            if " - " in s:
-                title = s.split(" - ", 1)[1].strip() if " - " in s else s.strip()
-
-        low = s.lower()
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith(("3780", "377", "376")) and " - " in stripped:
+            title = stripped.split(" - ", 1)[1].strip()
+        low = stripped.lower()
         if low in ("symptom", "environment", "resolution", "keywords"):
             if current and content:
                 sections[current] = "\n".join(content).strip()
-            current = low
-            content = []
-        elif current and s:
-            if low not in ("object status", "quality rating", "description", "products", "attributes", "available languages", "rate this document", "see also"):
-                content.append(s)
-
+            current, content = low, []
+        elif current and stripped and low not in _DROP:
+            content.append(stripped)
     if current and content:
         sections[current] = "\n".join(content).strip()
 
-    clean = []
-    if title:
-        clean.append(f"TITLE: {title}")
+    clean = [f"TITLE: {title}"] if title else []
     for k in ("symptom", "environment", "resolution", "keywords"):
         if sections.get(k):
             clean.append(f"{k.upper()}:\n{sections[k]}")
-    clean_text = "\n\n".join(clean) if clean else text
+    return title, ("\n\n".join(clean) if clean else text)
 
-    logger.info(f"  ✅ Scraped {len(text)} chars, title: {title[:60]}")
-    trace.append({"at": _ts(), "phase": "parse", "status": "ok",
-                  "message": f"Parsed article: {title[:60]}" if title else "Parsed article",
-                  "detail": f"{len(clean_text)} chars cleaned"})
 
-    # Best-effort: download + extract attachment text, append for the LLM. Never blocks.
-    # attachments = [{name, ext, data}] — scheduler persists data to S3/local.
+def extract_note() -> dict:
+    """Step 4 (notes) — read the open article + its attachments.
+
+    Returns {ok, raw_text, clean_text, title, attachments, error, trace}.
+    attachments = [{name, ext, data}] — the caller persists `data` and drops it.
+    """
+    trace, rec = _tracer()
+
+    ok, text = _get_text()
+    tries = 0
+    while (not ok or not text or len(text.strip()) < 100) and tries < 3:
+        tries += 1
+        rec("extract", "info", f"Content thin ({len((text or '').strip())} chars) — waiting (retry {tries})")
+        time.sleep(5)
+        ok, text = _get_text()
+    if not ok or not text or len(text.strip()) < 100:
+        rec("extract", "error", "Extracted text too short", f"{len(text or '')} chars")
+        return {"ok": False, "error": "too_short", "trace": trace}
+
+    rec("extract", "ok", f"Extracted {len(text)} chars")
+    title, clean_text = _parse_note_sections(text)
+    rec("parse", "ok", f"Parsed article: {title[:60]}" if title else "Parsed article",
+        f"{len(clean_text)} chars cleaned")
+
+    # Attachments are best-effort — a failure here never fails the run.
     attachments = []
     try:
         att_text, attachments = _fetch_attachments()
         if attachments:
             if att_text:
-                clean_text = clean_text + "\n\n" + att_text
-                text = text + "\n\n" + att_text
-            trace.append({"at": _ts(), "phase": "attachments", "status": "ok",
-                          "message": f"Attached {len(attachments)} file(s)",
-                          "detail": ", ".join(a["name"] for a in attachments)})
+                clean_text += "\n\n" + att_text
+                text += "\n\n" + att_text
+            rec("attachments", "ok", f"Attached {len(attachments)} file(s)",
+                ", ".join(a["name"] for a in attachments))
         else:
-            trace.append({"at": _ts(), "phase": "attachments", "status": "info",
-                          "message": "No attachments"})
+            rec("attachments", "info", "No attachments")
     except Exception as e:
         logger.warning(f"  ⚠️ attachment fetch failed: {e}")
-        trace.append({"at": _ts(), "phase": "attachments", "status": "warn",
-                      "message": "Attachment fetch failed — using note text only", "detail": str(e)})
+        rec("attachments", "warn", "Attachment fetch failed — using note text only", str(e))
 
-    return {
-        "success": True,
-        "raw_text": text,
-        "clean_text": clean_text,
-        "title": title,
-        "trace": trace,
-        "attachments": attachments,
-    }
+    return {"ok": True, "raw_text": text, "clean_text": clean_text, "title": title,
+            "attachments": attachments, "error": "", "trace": trace}
 
 
 # ---- SAP Community (public, no login) ------------------------------------
@@ -785,82 +900,46 @@ def _extract_community_images() -> list:
     return images
 
 
-def scrape_community(url: str) -> dict:
-    """Scrape a public SAP Community page. No login — navigate, wait out the
-    Cloudflare challenge + render, extract the main text + content images.
-    Returns { success, raw_text, clean_text, title, images, error, trace }."""
-    with _BROWSER_LOCK:
-        return _scrape_community_locked(url)
+def extract_community() -> dict:
+    """Step 4 (community) — read the open forum page + its content images.
 
-
-def _scrape_community_locked(url: str) -> dict:
-    trace = []
-
-    def tr(phase, status, message, detail=None):
-        trace.append({"at": _ts(), "phase": phase, "status": status,
-                      "message": message, "detail": detail})
-
-    nav_ok, nav_out = _navigate(url, timeout=30)
-    tr("navigate", "ok" if nav_ok else "error",
-       f"Opened {url}" if nav_ok else "Navigate command failed",
-       None if nav_ok else (nav_out[:300] or None))
-    if not nav_ok:
-        _release_browser_page()
-        return {"success": False, "error": "navigate_failed", "trace": trace}
-
-    # Poll until the challenge clears and real content renders (or we give up).
-    sig = _probe()
-    waits = 0
-    while (sig is None or _looks_loading(sig)) and waits < COMMUNITY_LOADING_WAITS:
-        time.sleep(STEP_COOLDOWN)
-        sig = _probe()
-        waits += 1
-    cleared = sig is not None and not _looks_loading(sig)
-    tr("render", "ok" if cleared else "warn",
-       "Page rendered" if cleared else f"Still loading after {waits} waits",
-       None if cleared else "Cloudflare challenge may not have cleared")
-
-    ok, text = _get_text()
-    text = text or ""
-    if not ok or len(text) < 100:
-        tr("done", "error", "Extracted text too short", f"{len(text)} chars")
-        _release_browser_page()
-        return {"success": False, "error": "too_short", "raw_text": text[:500], "trace": trace}
-
-    # Title: page heading if we have one, else the first non-trivial line.
-    title = (sig or {}).get("heading") or ""
-    if not title:
-        for line in text.split("\n"):
-            if len(line.strip()) > 8:
-                title = line.strip()[:120]
-                break
-
-    # Cap text — community SPA dumps are huge; LLM only needs the article body.
-    if len(text) > MAX_COMMUNITY_TEXT_CHARS:
-        tr("parse", "warn", f"Truncated text {len(text)} → {MAX_COMMUNITY_TEXT_CHARS} chars",
-           title[:60] if title else None)
-        text = text[:MAX_COMMUNITY_TEXT_CHARS]
-    else:
-        tr("parse", "ok", f"Extracted {len(text)} chars",
-           title[:60] if title else None)
-
-    # Content images + their placement context (best-effort; never blocks).
-    images = []
+    Returns {ok, raw_text, clean_text, title, images, error, trace}. Always releases
+    the page so Chromium can GC the SPA before the next URL.
+    """
+    trace, rec = _tracer()
     try:
-        images = _extract_community_images()
-        if images:
-            tr("images", "ok", f"Captured {len(images)} image(s)",
-               ", ".join(i["ref"] for i in images))
+        ok, text = _get_text()
+        text = text or ""
+        if not ok or len(text) < 100:
+            rec("extract", "error", "Extracted text too short", f"{len(text)} chars")
+            return {"ok": False, "error": "too_short", "raw_text": text[:500], "trace": trace}
+
+        sig = _probe() or {}
+        title = sig.get("heading") or ""
+        if not title:
+            title = next((ln.strip()[:120] for ln in text.split("\n") if len(ln.strip()) > 8), "")
+
+        # Community SPA dumps are huge; the LLM only needs the article body.
+        if len(text) > MAX_COMMUNITY_TEXT_CHARS:
+            rec("parse", "warn", f"Truncated text {len(text)} → {MAX_COMMUNITY_TEXT_CHARS} chars",
+                title[:60] or None)
+            text = text[:MAX_COMMUNITY_TEXT_CHARS]
         else:
-            tr("images", "info", "No content images")
-    except Exception as e:
-        tr("images", "warn", "Image capture failed — text only", str(e))
+            rec("parse", "ok", f"Extracted {len(text)} chars", title[:60] or None)
 
-    # Drop the heavy SPA from Chrome RAM before the next URL.
-    _release_browser_page()
+        images = []
+        try:
+            images = _extract_community_images()
+            rec("images", "ok" if images else "info",
+                f"Captured {len(images)} image(s)" if images else "No content images",
+                ", ".join(i["ref"] for i in images) or None)
+        except Exception as e:
+            rec("images", "warn", "Image capture failed — text only", str(e))
 
-    return {"success": True, "raw_text": text, "clean_text": text,
-            "title": title, "images": images, "trace": trace}
+        return {"ok": True, "raw_text": text, "clean_text": text, "title": title,
+                "images": images, "error": "", "trace": trace}
+    finally:
+        _release_browser_page()
 
 
 def _release_browser_page() -> None:
@@ -893,4 +972,33 @@ if __name__ == "__main__":
     for sig, want in cases:
         got = classify(sig)
         assert got == want, f"classify {sig.get('lc')!r} → {got}, expected {want}"
-    print(f"✅ classify() self-check passed ({len(cases)} cases)")
+
+    # Bot-verification detection. The Turnstile variant is the one that used to slip
+    # through as "Page rendered" and reach the LLM as if it were the article.
+    def _sig(text, heading=""):
+        return {"len": len(text), "lc": text.lower(), "heading": heading,
+                "hasPass": False, "hasUser": False, "suserTiles": [], "acctTiles": [], "btns": []}
+
+    challenges = [
+        ("community.sap.com\nVerify you are human by completing the action below.\n"
+         "community.sap.com needs to review the security of your connection before "
+         "proceeding.\nRay ID: 9c1f2a0b\nPerformance & security by Cloudflare",
+         "community.sap.com"),
+        ("Just a moment... Enable JavaScript and cookies to continue", ""),
+        ("Checking your browser before accessing community.sap.com", ""),
+        ("me.sap.com", "me.sap.com"),                      # bare-hostname heading, tiny body
+    ]
+    for text, head in challenges:
+        assert is_challenge(_sig(text, head)), f"missed challenge: {text[:50]!r}"
+
+    not_challenges = [
+        ("Not able to see APIM in integration suite " + "body text " * 120,
+         "Not able to see APIM in integration suite"),
+        ("Symptom The iFlow fails with HTTP 500. Resolution Redeploy the artifact. " * 12,
+         "HTTP 500 from receiver"),
+    ]
+    for text, head in not_challenges:
+        assert not is_challenge(_sig(text, head)), f"false challenge: {head!r}"
+
+    print(f"✅ scraper self-check passed ({len(cases)} classify, "
+          f"{len(challenges) + len(not_challenges)} challenge cases)")

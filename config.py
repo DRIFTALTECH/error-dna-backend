@@ -22,34 +22,30 @@ AUTH_TOKEN_TTL = int(os.getenv("AUTH_TOKEN_TTL", str(7 * 24 * 3600)))
 # OAuth client_credentials access tokens (default 1h).
 OAUTH_TOKEN_TTL = int(os.getenv("OAUTH_TOKEN_TTL", "3600"))
 
-# Error diagnose — distinct-error vector match threshold (0–1).
-ERROR_MATCH_THRESHOLD = float(os.getenv("ERROR_MATCH_THRESHOLD", "0.70"))
-# Vector candidates when matching raw/generalized text to distinct_errors.
+# ---- Error diagnose (services/error_diagnose.py) ----
+# L2 — min cosine similarity to merge a new error into an existing cluster.
+# Higher than the solution floor on purpose: a wrong merge poisons a cluster's
+# raw-message history, a missed merge only costs a duplicate row.
+ERROR_CLUSTER_THRESHOLD = float(os.getenv("ERROR_CLUSTER_THRESHOLD", "0.75"))
+# L2 — vector candidates pulled from distinct_error_embeddings.
 ERROR_VECTOR_SEARCH_LIMIT = int(os.getenv("ERROR_VECTOR_SEARCH_LIMIT", "5"))
-# Semantic solution notes returned per diagnose (no family filter).
+# L3 — min cosine similarity for a solution note to be returned at all.
+ERROR_SOLUTION_THRESHOLD = float(os.getenv("ERROR_SOLUTION_THRESHOLD", "0.50"))
+# L3 — max solution notes returned per diagnose (no family filter).
 ERROR_SOLUTION_LIMIT = int(os.getenv("ERROR_SOLUTION_LIMIT", "10"))
-# Informational run lines — skip semantic note search + fallback.
-INFORMATIONAL_FAMILY_CODE = os.getenv("INFORMATIONAL_FAMILY_CODE", "RUN_DIAGNOSTIC_EVENT")
 
-# Hybrid search — vector + keyword blend for SAP note solutions.
-HYBRID_VECTOR_WEIGHT = float(os.getenv("HYBRID_VECTOR_WEIGHT", "0.7"))
-HYBRID_KEYWORD_WEIGHT = float(os.getenv("HYBRID_KEYWORD_WEIGHT", "0.3"))
-HYBRID_CANDIDATE_LIMIT = int(os.getenv("HYBRID_CANDIDATE_LIMIT", "20"))
+# Vector search over summary_embeddings (MCP hybrid_search tool + L3).
+# ponytail: the tool is still named hybrid_search for its MCP clients; the
+# keyword leg is gone, scoring is pure cosine.
 HYBRID_SEARCH_DEFAULT_LIMIT = int(os.getenv("HYBRID_SEARCH_DEFAULT_LIMIT", "5"))
 HYBRID_SEARCH_MAX_LIMIT = int(os.getenv("HYBRID_SEARCH_MAX_LIMIT", "20"))
-HYBRID_KEYWORD_SCORE_TITLE = float(os.getenv("HYBRID_KEYWORD_SCORE_TITLE", "1.0"))
-HYBRID_KEYWORD_SCORE_ISSUE = float(os.getenv("HYBRID_KEYWORD_SCORE_ISSUE", "0.85"))
-HYBRID_KEYWORD_SCORE_TAGS = float(os.getenv("HYBRID_KEYWORD_SCORE_TAGS", "0.75"))
-HYBRID_KEYWORD_SCORE_SUMMARY = float(os.getenv("HYBRID_KEYWORD_SCORE_SUMMARY", "0.55"))
-HYBRID_KEYWORD_TOKEN_MIN_LEN = int(os.getenv("HYBRID_KEYWORD_TOKEN_MIN_LEN", "3"))
-HYBRID_KEYWORD_TOKEN_SCORE = float(os.getenv("HYBRID_KEYWORD_TOKEN_SCORE", "0.4"))
 
-# LLM — error generalize (distinct cluster creation).
-ERROR_GENERALIZE_TEMPERATURE = float(os.getenv("ERROR_GENERALIZE_TEMPERATURE", "0.2"))
-ERROR_GENERALIZE_MAX_TOKENS = int(os.getenv("ERROR_GENERALIZE_MAX_TOKENS", "16384"))
-ERROR_GENERALIZE_TIMEOUT = float(os.getenv("ERROR_GENERALIZE_TIMEOUT", "60"))
+# LLM — L1 expand (retrieval query + signature + family + problem).
+ERROR_EXPAND_TEMPERATURE = float(os.getenv("ERROR_EXPAND_TEMPERATURE", "0.2"))
+ERROR_EXPAND_MAX_TOKENS = int(os.getenv("ERROR_EXPAND_MAX_TOKENS", "2000"))
+ERROR_EXPAND_TIMEOUT = float(os.getenv("ERROR_EXPAND_TIMEOUT", "60"))
 
-# LLM — ZHC fallback when hybrid_search returns zero solutions.
+# LLM — ZHC fallback when the RAG returns zero solution notes.
 ERROR_FALLBACK_TEMPERATURE = float(os.getenv("ERROR_FALLBACK_TEMPERATURE", "0.2"))
 ERROR_FALLBACK_MAX_TOKENS = int(os.getenv("ERROR_FALLBACK_MAX_TOKENS", "8192"))
 ERROR_FALLBACK_TIMEOUT = float(os.getenv("ERROR_FALLBACK_TIMEOUT", "120"))
@@ -61,10 +57,34 @@ ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")
 # the extracted text from here then delete the files. Override per host in .env.
 SCRAPE_DOWNLOAD_DIR = os.getenv("SCRAPE_DOWNLOAD_DIR", os.path.expanduser("~/Downloads"))
 
-# LLM API
+# LLM API. LLM_API_URL is the legacy full chat-completions path (raw httpx callers);
+# LangChain's ChatOpenAI wants the base — derived from it unless LLM_BASE_URL is set.
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_API_URL = os.getenv("LLM_API_URL", "https://api.deepseek.com/v1/chat/completions")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "") or LLM_API_URL.split("/chat/completions")[0]
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+
+# ---- Ingest chain (services/ingest_chain.py) ----
+# Pause between chain steps — lets Chrome settle and keeps the trace readable.
+CHAIN_STEP_DELAY_SEC = float(os.getenv("CHAIN_STEP_DELAY_SEC", "3"))
+# Step 3 re-verify attempts when the page is thin / still rendering.
+CHAIN_PAGE_RETRIES = int(os.getenv("CHAIN_PAGE_RETRIES", "3"))
+# Step 5 — LangChain summarize call.
+SUMMARIZE_TEMPERATURE = float(os.getenv("SUMMARIZE_TEMPERATURE", "0.3"))
+SUMMARIZE_MAX_TOKENS = int(os.getenv("SUMMARIZE_MAX_TOKENS", "4000"))
+SUMMARIZE_TIMEOUT = float(os.getenv("SUMMARIZE_TIMEOUT", "120"))
+# Max article chars handed to the LLM.
+SUMMARIZE_MAX_INPUT_CHARS = int(os.getenv("SUMMARIZE_MAX_INPUT_CHARS", "15000"))
+# Community drain — pause between URLs so Chrome reclaims RAM on small boxes.
+COMMUNITY_INTER_ITEM_SLEEP_SEC = float(os.getenv("COMMUNITY_INTER_ITEM_SLEEP_SEC", "60"))
+# Community sign-in lands here first (Khoros hands off to accounts.sap.com, the same
+# IdP the notes scraper already drives). An existing session redirects straight back.
+COMMUNITY_LOGIN_URL = os.getenv(
+    "COMMUNITY_LOGIN_URL", "https://community.sap.com/t5/user/userloginpage/tab/user")
+# A community thread shorter than this is a shell/redirect, not the article.
+COMMUNITY_MIN_CHARS = int(os.getenv("COMMUNITY_MIN_CHARS", "600"))
+# Step 3 attempts for community pages — Cloudflare needs longer than a note.
+COMMUNITY_PAGE_RETRIES = int(os.getenv("COMMUNITY_PAGE_RETRIES", "10"))
 
 # Embeddings — Amazon Titan Text Embeddings V2 via Bedrock (same AWS creds as Aurora IAM).
 EMBED_MODEL_ID = os.getenv("EMBED_MODEL_ID", "amazon.titan-embed-text-v2:0")

@@ -15,12 +15,14 @@ class CredentialAdd(BaseModel):
     login_url: str = "https://me.sap.com"
     username: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
+    label: Optional[str] = None
 
 
 class CredentialUpdate(BaseModel):
     login_url: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
+    label: Optional[str] = None
 
 
 class CredentialTestBody(BaseModel):
@@ -52,11 +54,11 @@ def _cred_to_account(row: dict) -> dict:
         "label": row.get("label") or "",
         "login_url": row.get("login_url") or "",
         "username_masked": _mask(row.get("username")),
-        "status": "healthy" if active else "standby",
+        "status": "active" if active else "standby",
         "usage_today": 0,
         "last_used_at": None,
         "active": active,
-        "status_text": "✅ Active" if active else "⏸ Standby",
+        "status_text": "Scraper" if active else "Standby",
     }
 
 
@@ -81,9 +83,12 @@ async def list_credentials():
 @router.post("")
 async def add_credential(body: CredentialAdd):
     from services.crypto import encrypt
+    existing = await read("SELECT COUNT(*) AS c FROM credentials")
+    is_active = 1 if int(existing[0]["c"] or 0) == 0 else 0
+    label = (body.label or "").strip() or _auto_label(body.username)
     rows = await write(
-        "INSERT INTO credentials (label, login_url, username, password) VALUES (?,?,?,?) RETURNING id",
-        (_auto_label(body.username), body.login_url, body.username, encrypt(body.password)),
+        "INSERT INTO credentials (label, login_url, username, password, is_active) VALUES (?,?,?,?,?) RETURNING id",
+        (label, body.login_url, body.username, encrypt(body.password), is_active),
     )
     return {"ok": True, "id": rows[0]["id"]}
 
@@ -95,7 +100,10 @@ async def update_credential(cred_id: int, body: CredentialUpdate):
         sets.append("login_url=?"); params.append(body.login_url)
     if body.username:
         sets.append("username=?"); params.append(body.username)
-        sets.append("label=?"); params.append(_auto_label(body.username))
+        if not (body.label or "").strip():
+            sets.append("label=?"); params.append(_auto_label(body.username))
+    if body.label is not None and body.label.strip():
+        sets.append("label=?"); params.append(body.label.strip())
     if body.password:
         from services.crypto import encrypt
         sets.append("password=?"); params.append(encrypt(body.password))

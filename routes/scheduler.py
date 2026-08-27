@@ -27,7 +27,7 @@ async def scheduler_status():
         """SELECT
             SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) as scraped,
             SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed
-           FROM scrape_log WHERE date(created_at) = ?""",
+           FROM scrape_log WHERE substr(created_at, 1, 10) = ?""",
         (today,),
     ))[0]
 
@@ -110,7 +110,7 @@ async def rotate_account():
 
 @router.get("/embeddings")
 async def embeddings_status():
-    """Counts + live progress for the notes embedding backfill job."""
+    """Counts + live progress for the embedding backfill job (notes + community)."""
     from services import embed_backfill
     counts = await embed_backfill.counts()
     return {**counts, **embed_backfill.status()}

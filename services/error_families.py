@@ -1,10 +1,13 @@
-"""Error family catalog — CSV seed, pattern classify, LLM catalog."""
+"""Error family catalog — CSV seed + LLM catalog.
+
+Classification is the LLM's job (services/error_expand.py, ingest chain step 5),
+validated against valid_codes(). The CSV's match_patterns column is ignored.
+"""
 
 from __future__ import annotations
 
 import csv
 import json
-import re
 from pathlib import Path
 
 from db import read, write
@@ -23,16 +26,6 @@ _catalog_cache: str | None = None
 _codes_cache: set[str] | None = None
 
 
-def _parse_patterns(raw: str) -> str:
-    """Normalize match_patterns cell to JSON array text."""
-    raw = (raw or "").strip()
-    if not raw:
-        return "[]"
-    if raw.startswith("["):
-        return raw
-    return json.dumps([p.strip() for p in raw.split(",") if p.strip()])
-
-
 async def seed_families() -> int:
     """Upsert all rows from data/error_families.csv. Returns count upserted."""
     if not CSV_PATH.is_file():
@@ -48,7 +41,6 @@ async def seed_families() -> int:
             name = (row.get("name") or code).strip()
             severity = (row.get("severity") or "medium").strip().lower()
             desc = (row.get("description") or "").strip()
-            patterns = _parse_patterns(row.get("match_patterns") or "[]")
             try:
                 priority = int(row.get("match_priority") or 999000)
             except ValueError:
@@ -56,16 +48,15 @@ async def seed_families() -> int:
             color = _COLORS.get(severity, "#58a6ff")
             await write(
                 """INSERT INTO error_families
-                   (code, family_name, severity, description, match_patterns, match_priority, color)
-                   VALUES (?,?,?,?,?,?,?)
+                   (code, family_name, severity, description, match_priority, color)
+                   VALUES (?,?,?,?,?,?)
                    ON CONFLICT (code) DO UPDATE SET
                      family_name = EXCLUDED.family_name,
                      severity = EXCLUDED.severity,
                      description = EXCLUDED.description,
-                     match_patterns = EXCLUDED.match_patterns,
                      match_priority = EXCLUDED.match_priority,
                      color = EXCLUDED.color""",
-                (code, name, severity, desc, patterns, priority, color),
+                (code, name, severity, desc, priority, color),
             )
             n += 1
     if codes:
@@ -117,34 +108,6 @@ async def catalog_for_llm(exclude: set[str] | None = None) -> str:
     lines = [f"- {r['code']}: {r['family_name']} — {r.get('description') or ''}" for r in rows]
     _catalog_cache = "\n".join(lines)
     return _catalog_cache
-
-
-async def classify_text(text: str) -> str:
-    """First regex match by match_priority (lowest first). Catch-all .* skipped until end."""
-    blob = (text or "").strip()
-    if not blob:
-        return "UNCLASSIFIED_ERROR"
-    rows = await read(
-        """SELECT code, match_patterns FROM error_families
-           WHERE match_patterns IS NOT NULL ORDER BY match_priority ASC""",
-    )
-    fallback = "UNCLASSIFIED_ERROR"
-    for r in rows:
-        code = r["code"]
-        try:
-            patterns = json.loads(r["match_patterns"] or "[]")
-        except json.JSONDecodeError:
-            continue
-        for pat in patterns:
-            if pat in (".*", "^.*$"):
-                fallback = code
-                continue
-            try:
-                if re.search(pat, blob, re.I | re.MULTILINE):
-                    return code
-            except re.error:
-                continue
-    return fallback
 
 
 async def code_from_family_field(value: str) -> str | None:

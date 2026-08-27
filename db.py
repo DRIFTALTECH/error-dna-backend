@@ -6,7 +6,6 @@ Public API — import these only:
   init_db()               → schema + seed (startup)
 """
 
-import re
 import asyncpg
 from config import DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME, AWS_REGION
 
@@ -36,18 +35,16 @@ async def _connect() -> asyncpg.Connection:
 
 
 def _translate(sql: str) -> str:
+    """SQLite-shaped SQL -> Postgres: IST timestamps, ? -> $N. No regex.
+
+    A literal ? inside a quoted SQL string would be rewritten too; no query in
+    this codebase has one. Write substr(col, 1, 10) directly for date parts.
+    """
     sql = sql.replace("datetime('now', 'localtime')", NOW_IST)
     sql = sql.replace("datetime('now','localtime')", NOW_IST)
     sql = sql.replace("datetime('now')", NOW_IST)
-    sql = re.sub(r"date\(([\w.]+)\)", r"substr(\1, 1, 10)", sql)
-    n = 0
-
-    def repl(_):
-        nonlocal n
-        n += 1
-        return f"${n}"
-
-    return re.sub(r"\?", repl, sql)
+    parts = sql.split("?")
+    return "".join(f"{part}${i}" for i, part in enumerate(parts[:-1], 1)) + parts[-1]
 
 
 async def _run(sql: str, params=None) -> list[dict]:
@@ -119,7 +116,6 @@ CREATE TABLE IF NOT EXISTS error_families (
     family_name TEXT NOT NULL,
     severity TEXT,
     description TEXT,
-    match_patterns TEXT DEFAULT '[]',
     match_priority INTEGER DEFAULT 999000,
     color TEXT,
     icon TEXT
@@ -220,6 +216,7 @@ CREATE TABLE IF NOT EXISTS community_scrape_log (
     duration_ms INTEGER,
     error_message TEXT,
     trace TEXT,
+    account_label TEXT,
     created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
 );
 
@@ -293,18 +290,22 @@ CREATE TABLE IF NOT EXISTS error_events (
     created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
 );
 
--- Persisted semantic links: distinct error cluster → solution note (summaries.id).
-CREATE TABLE IF NOT EXISTS error_cluster_solutions (
+-- Every raw error string ever seen, mapped to its cluster. L0 of the diagnose
+-- chain looks up raw_hash here: an exact repeat costs no LLM call and no embed.
+-- One cluster owns many raw messages; the list grows as new wordings arrive.
+CREATE TABLE IF NOT EXISTS error_messages (
     id SERIAL PRIMARY KEY,
     distinct_error_id INTEGER NOT NULL REFERENCES distinct_errors(id) ON DELETE CASCADE,
-    summary_id INTEGER NOT NULL REFERENCES summaries(id) ON DELETE CASCADE,
-    match_percent REAL NOT NULL,
-    hit_count INTEGER DEFAULT 1,
-    last_seen_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS'),
-    UNIQUE (distinct_error_id, summary_id)
+    raw_hash TEXT UNIQUE NOT NULL,
+    raw_text TEXT NOT NULL,
+    seen_count INTEGER DEFAULT 1,
+    first_seen_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS'),
+    last_seen_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
 );
 
--- One-shot family re-tag audit (services/migrate_families.py).
+CREATE INDEX IF NOT EXISTS error_messages_cluster_idx ON error_messages(distinct_error_id);
+
+-- Family re-tag audit (services/reclassify_notes.py).
 CREATE TABLE IF NOT EXISTS family_migration_log (
     id SERIAL PRIMARY KEY,
     summary_id INTEGER NOT NULL,
@@ -375,8 +376,16 @@ async def init_db():
         await conn.execute("ALTER TABLE scrape_log ADD COLUMN IF NOT EXISTS account_label TEXT;")
         # Community images manifest: {"image_1": {"key":..., "alt":...}, ...}
         await conn.execute("ALTER TABLE community_summaries ADD COLUMN IF NOT EXISTS images TEXT;")
+        # Community runs sign in with a real SAP credential now — record which one,
+        # same as scrape_log.
+        await conn.execute("ALTER TABLE community_scrape_log ADD COLUMN IF NOT EXISTS account_label TEXT;")
         # Note attachments: [{"name":..., "key":"doc/…", "ext":...}, ...]
         await conn.execute("ALTER TABLE summaries ADD COLUMN IF NOT EXISTS attachments TEXT;")
+        # Retrieval fields written by the ingest chain: verbatim error strings + a
+        # dense search paragraph. Both feed services.embeddings.build_blob().
+        for _t in ("summaries", "community_summaries"):
+            await conn.execute(f"ALTER TABLE {_t} ADD COLUMN IF NOT EXISTS error_signatures TEXT DEFAULT '[]';")
+            await conn.execute(f"ALTER TABLE {_t} ADD COLUMN IF NOT EXISTS search_text TEXT;")
         # Clock for 24h (configurable) auto account rotate.
         await conn.execute(
             "ALTER TABLE scheduler_config ADD COLUMN IF NOT EXISTS account_activated_at TEXT;"
@@ -390,11 +399,26 @@ async def init_db():
         for stmt in (
             "ALTER TABLE error_families ADD COLUMN IF NOT EXISTS code TEXT;",
             "ALTER TABLE error_families ADD COLUMN IF NOT EXISTS severity TEXT;",
-            "ALTER TABLE error_families ADD COLUMN IF NOT EXISTS match_patterns TEXT DEFAULT '[]';",
             "ALTER TABLE error_families ADD COLUMN IF NOT EXISTS match_priority INTEGER DEFAULT 999000;",
             "CREATE UNIQUE INDEX IF NOT EXISTS error_families_code_uidx ON error_families(code);",
         ):
             await conn.execute(stmt)
+        # Cached cluster->note links from the removed cluster graph. Its summary_id
+        # FK pointed at summaries(id) only, so it could never hold a community note.
+        await conn.execute("DROP TABLE IF EXISTS error_cluster_solutions;")
+        # error_events grew from a bare audit counter into the audit page's data
+        # source: what we answered with, how long it took, and why a call failed.
+        for _stmt in (
+            "ALTER TABLE error_events ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'ok';",
+            "ALTER TABLE error_events ADD COLUMN IF NOT EXISTS error_message TEXT;",
+            "ALTER TABLE error_events ADD COLUMN IF NOT EXISTS solution_source TEXT;",
+            "ALTER TABLE error_events ADD COLUMN IF NOT EXISTS solution_count INTEGER DEFAULT 0;",
+            "ALTER TABLE error_events ADD COLUMN IF NOT EXISTS response TEXT;",
+            "ALTER TABLE error_events ADD COLUMN IF NOT EXISTS duration_ms INTEGER;",
+            "CREATE INDEX IF NOT EXISTS error_events_caller_idx ON error_events(caller);",
+            "CREATE INDEX IF NOT EXISTS error_events_created_idx ON error_events(created_at DESC);",
+        ):
+            await conn.execute(_stmt)
         await conn.execute(SCHEDULER_SEED)
         await conn.execute(FIX_SEQUENCES)
     finally:
@@ -405,3 +429,13 @@ async def init_db():
     if n:
         print(f"📂 error_families seeded/updated: {n} from CSV")
     await write("DELETE FROM error_families WHERE code IS NULL")
+
+
+if __name__ == "__main__":
+    # ponytail self-check: the ? -> $N rewrite is the one bit of real logic here.
+    assert _translate("SELECT 1") == "SELECT 1"
+    assert _translate("WHERE a=? AND b=?") == "WHERE a=$1 AND b=$2"
+    assert _translate("VALUES (?,?,?)") == "VALUES ($1,$2,$3)"
+    assert _translate("SET t = datetime('now','localtime') WHERE id=?") == \
+        f"SET t = {NOW_IST} WHERE id=$1"
+    print("db: _translate ok")

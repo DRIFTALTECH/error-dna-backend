@@ -1,13 +1,14 @@
-"""Scheduler — picks URL, scrapes (auto-login), summarizes, saves."""
+"""Cron — decides WHEN the ingest chain runs. It never touches a browser or an LLM.
 
-import asyncio, random, time, json as _json, logging
+Everything the run actually does lives in services/ingest_chain.py.
+"""
+
+import asyncio, random, logging
 from datetime import datetime, timezone, timedelta
 
 from config import ACCOUNT_ROTATE_HOURS
 from db import read, write
-from services import community_ingest
-from services.scraper import scrape_note
-from services.summarizer import summarize
+from services import ingest_chain
 
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -90,160 +91,6 @@ def seconds_until_account_rotate(activated_at: str | None) -> int | None:
     return max(0, int((due - datetime.now(IST)).total_seconds()))
 
 
-def _now_hms():
-    return datetime.now(IST).strftime("%H:%M:%S")
-
-
-async def one_scrape():
-    t0 = time.time()
-    print(f"\n{'='*60}", flush=True)
-
-    run_trace = [{"at": _now_hms(), "phase": "queued", "status": "info",
-                  "message": "Scrape job accepted by scheduler"}]
-
-    def rt(phase, status, message, detail=None):
-        run_trace.append({"at": _now_hms(), "phase": phase, "status": status,
-                          "message": message, "detail": detail})
-
-    try:
-        creds = await read("SELECT * FROM credentials WHERE is_active=1 LIMIT 1")
-        if not creds:
-            creds = await read("SELECT * FROM credentials LIMIT 1")
-        cred = creds[0] if creds else None
-        account_label = (cred.get("label") if cred else None) or ""
-        rt("account", "ok" if cred else "warn",
-           f"Assigned {account_label}" if account_label else "No credential configured")
-
-        # Atomic claim — closes the race where two API processes both SELECT the
-        # same pending row during the pre-scrape sleeps and then fight over Chrome.
-        claimed = await write(
-            """UPDATE urls SET status='scraping'
-               WHERE id = (
-                 SELECT id FROM urls WHERE status='pending' ORDER BY id ASC LIMIT 1
-               )
-               RETURNING *"""
-        )
-        if not claimed:
-            print("✅ Queue empty", flush=True)
-            return
-        url = claimed[0]
-        log(f"URL #{url['source_id']}: {url.get('title','')[:60]}")
-        await asyncio.sleep(5)
-
-        ex = await read(
-            "SELECT id,source_version FROM summaries WHERE source_id=? AND is_latest=1",
-            (url["source_id"],),
-        )
-        if ex and (ex[0]["source_version"] or 0) >= 1:
-            await write("UPDATE urls SET status='skipped' WHERE id=?", (url["id"],))
-            log(f"⏭ SKIP: already have v{ex[0]['source_version']}")
-            return
-        await asyncio.sleep(5)
-
-        log(f"Scraping... {url['source_url'][:60]}")
-        user = cred["username"] if cred else None
-        pw = None
-        if cred:
-            from services.crypto import decrypt
-            pw = decrypt(cred["password"])
-        result = await asyncio.to_thread(scrape_note, url["source_url"], user, pw)
-        run_trace.extend(result.get("trace") or [])
-
-        if not result["success"]:
-            log(f"❌ FAILED: {result['error']}")
-            await write("UPDATE urls SET status='failed', error_message=? WHERE id=?", (result["error"], url["id"]))
-            await write(
-                "INSERT INTO scrape_log(url_id,source_id,status,duration_ms,error_message,trace,account_label) VALUES(?,?,?,?,?,?,?)",
-                (url["id"], url["source_id"], "failed", int((time.time() - t0) * 1000),
-                 result["error"], _json.dumps(run_trace), account_label or None),
-            )
-            return
-
-        log(f"✅ {len(result.get('clean_text',''))} chars cleaned")
-        await asyncio.sleep(5)
-
-        # Persist note attachments (S3 or local) before LLM — keep a name→key manifest.
-        from services.image_store import save as _blob_save
-        att_manifest = []
-        for a in (result.get("attachments") or []):
-            try:
-                key = await asyncio.to_thread(_blob_save, a["data"], a.get("ext", "bin"), "doc")
-                att_manifest.append({"name": a["name"], "key": key, "ext": a.get("ext", "")})
-            except Exception as e:
-                log(f"  ⚠️ attachment save failed ({a.get('name')}): {e}")
-        if att_manifest:
-            rt("attachments", "ok", f"Saved {len(att_manifest)} attachment(s)",
-               ", ".join(a["name"] for a in att_manifest))
-
-        log("LLM summarizing...")
-        rt("summarize", "info", "Sending article to LLM for summarization")
-        try:
-            summary = await summarize(result["clean_text"] or result["raw_text"])
-            log(f"  → {summary.get('title','')[:60]}")
-            log(f"  → {summary.get('family','')} / {summary.get('type','')}")
-            rt("summarize", "ok", f"LLM produced: {summary.get('title','')[:60]}",
-               f"{summary.get('family','')} / {summary.get('type','')}")
-        except Exception as e:
-            log(f"❌ LLM failed: {e}")
-            rt("summarize", "error", "LLM summarization failed", str(e))
-            # Drop orphan blobs if we never store a summary.
-            from services.image_store import delete as _blob_del
-            for meta in att_manifest:
-                _blob_del(meta.get("key", ""))
-            await write("UPDATE urls SET status='failed', error_message=? WHERE id=?", (f"LLM:{e}", url["id"]))
-            await write(
-                "INSERT INTO scrape_log(url_id,source_id,status,duration_ms,error_message,trace,account_label) VALUES(?,?,?,?,?,?,?)",
-                (url["id"], url["source_id"], "failed", int((time.time() - t0) * 1000),
-                 f"LLM:{e}", _json.dumps(run_trace), account_label or None),
-            )
-            return
-        await asyncio.sleep(5)
-
-        def s(v):
-            if v is None:
-                return ""
-            if isinstance(v, (list, dict)):
-                return _json.dumps(v)
-            return str(v)
-
-        now = datetime.now(IST).isoformat()
-        inserted = await write(
-            """INSERT INTO summaries(source_id,url_id,title,family,area,type,issue,summary,steps,gotchas,tags,
-               source_version,source_date,source_url,component,environment,attachments,is_latest,verification_status,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'current',?,?) RETURNING id""",
-            (url["source_id"], url["id"], s(summary.get("title")), s(summary.get("family")),
-             s(summary.get("area")), s(summary.get("type")), s(summary.get("issue")),
-             s(summary.get("summary")), s(summary.get("steps")), s(summary.get("gotchas")),
-             s(summary.get("tags")), 1, url.get("released_on"), url["source_url"],
-             url.get("component"), s(summary.get("environment", "[]")), s(att_manifest), now, now),
-        )
-        summary_id = inserted[0]["id"]
-        await write("UPDATE urls SET status='completed', scraped_at=? WHERE id=?", (now, url["id"]))
-        rt("store", "ok", "Summary stored in knowledge base", "action: create")
-        # Vector chunk — best-effort; recorded in the same scrape_log trace.
-        from services.embeddings import embed_summary_safe
-        emb = await embed_summary_safe("notes", summary_id, url["source_id"], {
-            "title": s(summary.get("title")), "family": s(summary.get("family")),
-            "issue": s(summary.get("issue")), "summary": s(summary.get("summary")),
-            "tags": s(summary.get("tags")), "gotchas": s(summary.get("gotchas")),
-        })
-        rt("embed", "ok" if emb["ok"] else "error", emb["message"], emb.get("detail"))
-        rt("done", "ok", "Run completed successfully")
-        await write(
-            "INSERT INTO scrape_log(url_id,source_id,status,action,duration_ms,trace,account_label) VALUES(?,?,?,?,?,?,?)",
-            (url["id"], url["source_id"], "success", "create", int((time.time() - t0) * 1000),
-             _json.dumps(run_trace), account_label or None),
-        )
-
-        dur = int((time.time() - t0) * 1000)
-        print(f"✅ SAVED #{url['source_id']} [{dur}ms]", flush=True)
-        print(f"   {summary.get('title','')[:80]}", flush=True)
-        print(f"   {summary.get('family','')}", flush=True)
-
-    except Exception as e:
-        logger.exception(f"Fatal: {e}")
-
-
 async def loop():
     while True:
         try:
@@ -257,7 +104,7 @@ async def loop():
             # commands but not memory pressure — notes waking every 30s ate the
             # community drain's 60s inter-URL sleep, so Chrome never idled and the
             # OOM killer took the API down. Wait the drain out. Drop on a bigger box.
-            if not paused and not community_ingest.is_running():
+            if not paused and not ingest_chain.is_draining():
                 should = True
                 if next_at:
                     try:
@@ -266,7 +113,7 @@ async def loop():
                     except Exception:
                         pass
                 if should:
-                    await one_scrape()
+                    await ingest_chain.run("notes")
                     delay = random.randint(min_d, max_d) * 60
                     next_t = (datetime.now(IST) + timedelta(seconds=delay)).isoformat()
                     await write("UPDATE scheduler_config SET next_scrape_at=? WHERE id=1", (next_t,))
@@ -281,9 +128,10 @@ async def loop():
 async def start():
     # Self-heal: a scrape that crashed mid-run leaves its URL stuck in 'scraping'.
     # Nothing is scraping at boot (one runs at a time), so reset those to pending.
-    healed = await write("UPDATE urls SET status='pending' WHERE status='scraping' RETURNING id")
-    if healed:
-        logger.info(f"↺ reset {len(healed)} stuck 'scraping' URL(s) → pending")
+    for table in ("urls", "community_urls"):
+        healed = await write(f"UPDATE {table} SET status='pending' WHERE status='scraping' RETURNING id")
+        if healed:
+            logger.info(f"↺ reset {len(healed)} stuck 'scraping' {table} row(s) → pending")
     # Start the account-rotate clock if never stamped (won't rotate until N hours later).
     cfg = await read("SELECT account_activated_at FROM scheduler_config WHERE id=1")
     if cfg and not cfg[0].get("account_activated_at"):

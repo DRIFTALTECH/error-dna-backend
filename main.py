@@ -73,6 +73,8 @@ app.include_router(community_router, dependencies=_auth)  # /api/community/* —
 from routes.developer import router as developer_router
 app.include_router(developer_router, dependencies=_auth)  # /api/developer/* — MCP bearer + URL
 app.include_router(errors_router, dependencies=_auth)  # POST /api/errors/diagnose — Bearer required
+from routes.audit import router as audit_router
+app.include_router(audit_router, dependencies=_auth)  # /api/audit/* — per-client call trail
 
 
 if __name__ == "__main__":

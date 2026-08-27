@@ -31,7 +31,7 @@ Use this server whenever a user hits an SAP or integration error — a stack tra
 error code, a failing adapter, or a symptom — and wants a known, cited fix.
 
 Typical flow:
-  1. Prefer hybrid_search(query) — semantic + keyword top matches with match_percent,
+  1. Prefer hybrid_search(query) — semantic top matches with match_percent,
      full summary, and images in one call.
   2. (optional) list_families() / search_errors() for browse/filter by family.
   3. get_error(id) if you only have an id and need the full fix.

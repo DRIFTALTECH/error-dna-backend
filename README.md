@@ -20,49 +20,55 @@ The web UI lives in the `error-knowledge-base/` submodule (React). This repo is 
 
 ## The diagnose flow (simple walkthrough)
 
-When you call `POST /api/errors/diagnose` with an error message, this is what happens:
+When you call `POST /api/errors/diagnose` with an error message:
 
 ```
 You send error text
         │
         ▼
 ┌───────────────────────────────────────┐
-│ 1. Search existing error clusters     │  Compare your error against errors
-│    (vector similarity on raw text)    │  we've seen before using embeddings.
+│ L0. Have we seen this exact string?   │  Hash lookup against every raw error
+│                                       │  ever received. A repeat needs no AI
+│                                       │  call at all — it answers in ~80ms.
 └───────────────────────────────────────┘
         │
-        ├── Match ≥ 70%? ──► Use that cluster (bump occurrence count)
+        ├── Seen it ──► jump straight to L3 with the known error cluster
+        │
+        ▼ New string
+┌───────────────────────────────────────┐
+│ L1. LLM expands the error             │  Produces a retrieval query that keeps
+│                                       │  every code, adapter and path verbatim,
+│                                       │  plus a short signature, a family, and
+│                                       │  a plain-language "what broke".
+└───────────────────────────────────────┘
+        │
+        ▼
+┌───────────────────────────────────────┐
+│ L2. Search known error clusters       │  Vector similarity on the expanded text.
+└───────────────────────────────────────┘
+        │
+        ├── Match ≥ 75%? ──► use that cluster (its stored wording wins)
         │
         ▼ No match
 ┌───────────────────────────────────────┐
-│ 2. LLM generalizes the error           │  Strip user IDs, timestamps, GUIDs.
-│                                       │  Assign a title, family, and summary.
+│     Create a new cluster              │  New row + embedding.
 └───────────────────────────────────────┘
         │
         ▼
 ┌───────────────────────────────────────┐
-│ 3. Search clusters again               │  Same vector search on generalized text.
+│ L3. Search the knowledge base         │  Vector similarity over every stored
+│                                       │  note. On a cluster match the cluster's
+│                                       │  own vector searches too. Floor 50%,
+│                                       │  up to 10 notes.
 └───────────────────────────────────────┘
         │
-        ├── Match ≥ 70%? ──► Use that cluster
+        ├── Found notes? ──► return them. The knowledge base always wins.
         │
-        ▼ Still no match
+        ▼ Zero notes
 ┌───────────────────────────────────────┐
-│ 4. Create a new cluster                │  New row in distinct_errors + embedding.
-└───────────────────────────────────────┘
-        │
-        ▼
-┌───────────────────────────────────────┐
-│ 5. Search SAP Note fixes               │  Hybrid search: vector + keyword over
-│    (hybrid_search)                     │  summarized notes. Returns up to 10 hits.
-└───────────────────────────────────────┘
-        │
-        ├── Found notes? ──► Return solutions[] from knowledge base
-        │
-        ▼ Zero notes (and not an informational log line)
-┌───────────────────────────────────────┐
-│ 6. LLM fallback (ZHC prompt)           │  Zero-Hallucination troubleshooting
-│                                       │  assistant writes ROOT CAUSE + STEPS TO FIX.
+│     LLM fallback (ZHC prompt)         │  Zero-Hallucination assistant writes
+│                                       │  ROOT CAUSE + STEPS TO FIX. This answer
+│                                       │  is returned but never saved.
 └───────────────────────────────────────┘
         │
         ▼
@@ -71,25 +77,53 @@ You send error text
 
 ### Key ideas
 
-- **Cluster ≠ Family** — A cluster is one distinct error pattern (e.g. "HTTP 500 from receiver"). A family is a broad label (e.g. `HTTP_REQUEST_FAILED`). Many clusters can share a family.
-- **Similarity drives matching** — If two errors mean the same thing, they merge into one cluster (default threshold: 70%).
-- **Solutions are semantic** — SAP Note search is **not** filtered by family. It uses meaning (embeddings + keywords), not category labels.
-- **Informational errors are skipped** — Lines like "start execution of job" are classified as `RUN_DIAGNOSTIC_EVENT`. They get no solutions and no fallback.
+- **Repeats are free.** The same error string twice costs one hash lookup and one
+  vector query — no LLM call, no embedding call.
+- **Cluster ≠ Family.** A cluster is one distinct error pattern. A family is a broad
+  label (e.g. `HTTP_REQUEST_FAILED`). Many clusters share a family.
+- **A cluster's identity is stable.** Once an error merges into a cluster, the
+  response uses that cluster's stored title, wording and family — the same error
+  never comes back under a different name.
+- **Solutions are semantic.** Note search is **not** filtered by family. Pure
+  vector similarity; there is no keyword or pattern matching anywhere.
+- **The knowledge base always wins.** The LLM fallback runs only when zero notes
+  clear the 50% floor, and its answer never enters the knowledge base.
+- **One at a time.** A second diagnose that needs the LLM gets `409` rather than
+  being queued. Retry it.
 
 ---
 
 ## API response fields
 
+```json
+{
+  "distinct_error": {
+    "title": "", "generalized_error": "", "problem": "",
+    "family_code": "", "family_name": "",
+    "cluster_confidence": 0.0, "informational": false
+  },
+  "solutions": [],
+  "fallback_solution": "..."
+}
+```
+
 | Field | Meaning |
 |---|---|
-| `distinct_error_id` | Cluster ID this error was matched to or created |
-| `is_new_distinct` | `true` if a brand-new cluster was created |
-| `cluster_confidence` | How similar this error was to the cluster (0–100%) |
-| `occurrence_count` | How many times this cluster has been hit |
-| `family_code` / `family_name` | Broad error category |
-| `solutions` | SAP Note fixes from the knowledge base (up to 10) |
-| `fallback_solution` | LLM markdown answer when `solutions` is empty |
-| `solution_source` | `"knowledge_base"`, `"llm_fallback"`, or `"none"` |
+| `distinct_error.title` | The distinct error — a short stable label for this failure |
+| `distinct_error.generalized_error` | The expanded retrieval text for this cluster |
+| `distinct_error.problem` | Plain-language what broke and where |
+| `distinct_error.family_code` / `family_name` | Broad error category |
+| `distinct_error.cluster_confidence` | `100.0` exact repeat · similarity % on a cluster match · `0.0` for a brand-new cluster |
+| `distinct_error.informational` | Always `false` |
+| `solutions[]` | Up to 10 knowledge base fixes: `title`, `problem`, `whats_wrong`, `solution[]`, `cautions[]`, `match_percent` |
+| `fallback_solution` | LLM markdown answer. **Present only when `solutions` is empty** |
+
+| Status | When |
+|---|---|
+| `400` | `error_text` was whitespace only |
+| `401` | Missing, malformed or expired Bearer token |
+| `409` | Another diagnose is running — trigger again |
+| `422` | `error_text` missing or empty |
 
 ---
 
@@ -130,28 +164,75 @@ curl -s -X POST "https://16.113.9.182.sslip.io/api/errors/diagnose" \
 
 ---
 
-## Knowledge base flow (how notes get in)
+## Knowledge base flow — the ingest chain
+
+One chain, seven steps, in `services/ingest_chain.py`. Both SAP Notes and SAP
+Community pages run it; a `source` parameter picks the tables and decides whether
+step 2 needs credentials. Nothing else ingests.
 
 ```
-SAP Note URL added
+cron (services/scheduler.py) — decides WHEN, nothing else
         │
         ▼
-Background scheduler scrapes the page (OpenClaw browser)
-        │
+┌─ 1 fetch_url ─────────────────────────────────────────────┐
+│  Atomically claim the next pending URL. Already summarized │
+│  → skip.                                                   │
+└────────────────────────────────────────────────────────────┘
         ▼
-LLM summarizes → title, issue, steps, gotchas, tags, family
-        │
+┌─ 2 login ─────────────────────────────────────────────────┐
+│  Sign in with the active SAP credential. Notes sign in on  │
+│  the note URL; community signs in on the Khoros login URL, │
+│  which hands off to the same IdP. Live session → reused.   │
+└────────────────────────────────────────────────────────────┘
         ▼
-Stored in PostgreSQL (summaries / community_summaries)
-        │
+┌─ 3 open_page ─────────────────────────────────────────────┐
+│  Verify the page is really on screen.                      │
+│    3.1 thin / rendering / bot check → wait, re-probe, renav│
+│    3.2 bounced to login             → re-run step 2 once   │
+│    3.3 still not there              → fail, URL requeued   │
+└────────────────────────────────────────────────────────────┘
         ▼
-Embedding generated (Amazon Titan via Bedrock)
-        │
+┌─ 4 extract ───────────────────────────────────────────────┐
+│  Article text + attachments (notes) or images (community). │
+│  Blobs go to S3/local now; the LLM never carries bytes.    │
+└────────────────────────────────────────────────────────────┘
         ▼
-Available for hybrid_search + MCP tools
+┌─ 5 summarize ─────────────────────────────────────────────┐
+│  LangChain: PromptTemplate | ChatOpenAI | JsonOutputParser │
+│  → a validated NoteSummary. Community blogs self-skip.     │
+└────────────────────────────────────────────────────────────┘
+        ▼
+┌─ 6 embed ─────────────────────────────────────────────────┐
+│  build_blob() → Titan V2 vector.                           │
+└────────────────────────────────────────────────────────────┘
+        ▼
+┌─ 7 persist ───────────────────────────────────────────────┐
+│  Summary row + embedding row + URL status + run log.       │
+└────────────────────────────────────────────────────────────┘
 ```
 
-You manage this from the UI: **URLs**, **Scheduler**, **Community Ingest**.
+Every step appends to one trace, and every exit — success, skip, failure, crash —
+lands in the same `_finish()`: URL status, run log, orphan blob cleanup. There is
+no second exit path.
+
+`CHAIN_STEP_DELAY_SEC` pauses between steps so Chrome settles and the trace stays
+readable.
+
+### Retrieval fields
+
+Step 5 also produces two fields that exist purely so a note can be found again:
+
+| Field | What it is |
+|---|---|
+| `error_signatures` | The literal error strings, codes and log lines, copied verbatim — never paraphrased |
+| `search_text` | One dense paragraph phrased the way an engineer describes the failure |
+
+Diagnose queries are raw error text, so without these a note only matches on its
+prose. Both feed `build_blob()`. **Changing `build_blob()` invalidates every stored
+content hash** — run the embedding backfill (Scheduler → Embeddings) afterwards; it
+walks every latest summary and re-embeds the ones whose hash moved.
+
+You manage the queues from the UI: **URLs**, **Scheduler**, **Community Ingest**.
 
 ---
 
@@ -163,7 +244,7 @@ A separate MCP (Model Context Protocol) server exposes the same knowledge base t
 python3 -m mcp_server    # listens on port 3333
 ```
 
-Tools: `hybrid_search`, `search_errors`, `get_error`, `list_families`.
+Tools: `hybrid_search` (semantic; the name predates the removal of its keyword leg), `search_errors`, `get_error`, `list_families`.
 
 Bearer token is configured in **Developer → MCP Server** (not in `.env`).
 
@@ -184,13 +265,15 @@ error-dna-backend/
 │   ├── community.py        # SAP Community summaries
 │   └── scheduler.py        # Scrape + embed jobs
 ├── services/
-│   ├── error_diagnose.py   # Main diagnose chain
-│   ├── error_generalize.py # LLM error normalization
+│   ├── ingest_chain.py     # THE ingest chain — 7 steps, both sources
+│   ├── scheduler.py        # Cron only — decides when the chain runs
+│   ├── scraper.py          # Browser primitives the chain drives
+│   ├── llm.py              # Shared ChatOpenAI factory + article chat
+│   ├── error_diagnose.py   # The diagnose chain (L0-L4)
+│   ├── error_expand.py     # LLM: retrieval query + signature + family
 │   ├── error_fallback.py   # LLM fallback when no notes match
-│   ├── error_families.py   # Family catalog + pattern classifier
-│   ├── embeddings.py       # Titan vector embeddings
-│   ├── summarizer.py       # Note summarization LLM
-│   └── scheduler.py        # Background scrape loop
+│   ├── error_families.py   # Family catalog (CSV seed + LLM catalog)
+│   └── embeddings.py       # Titan vector embeddings
 ├── mcp_server/             # MCP tools for external AI clients
 ├── data/
 │   └── error_families.csv  # 24 error family definitions (seeded on startup)
@@ -238,11 +321,16 @@ All tunables live in `.env` with inline comments explaining each key. Highlights
 
 | Variable | Default | What it controls |
 |---|---|---|
-| `ERROR_MATCH_THRESHOLD` | `0.70` | Min similarity to merge into existing cluster |
-| `ERROR_SOLUTION_LIMIT` | `10` | SAP Note fixes returned per diagnose |
-| `HYBRID_VECTOR_WEIGHT` | `0.7` | Semantic search weight in hybrid blend |
-| `HYBRID_KEYWORD_WEIGHT` | `0.3` | Keyword search weight in hybrid blend |
-| `INFORMATIONAL_FAMILY_CODE` | `RUN_DIAGNOSTIC_EVENT` | Skip solutions for log-line errors |
+| `ERROR_CLUSTER_THRESHOLD` | `0.75` | Min similarity to merge into an existing cluster |
+| `ERROR_SOLUTION_THRESHOLD` | `0.50` | Min similarity for a note to be returned |
+| `ERROR_SOLUTION_LIMIT` | `10` | Knowledge base fixes returned per diagnose |
+| `ERROR_VECTOR_SEARCH_LIMIT` | `5` | Cluster candidates pulled in L2 |
+| `CHAIN_STEP_DELAY_SEC` | `3` | Pause between ingest chain steps |
+| `CHAIN_PAGE_RETRIES` | `3` | Step 3 re-verify attempts before failing |
+| `COMMUNITY_LOGIN_URL` | Khoros login page | Where community signs in (hands off to SAP ID) |
+| `COMMUNITY_PAGE_RETRIES` | `10` | Step 3 attempts for community — Cloudflare needs longer |
+| `COMMUNITY_MIN_CHARS` | `600` | Below this a thread is a shell, not the article |
+| `LLM_BASE_URL` | derived | ChatOpenAI base URL (defaults from `LLM_API_URL`) |
 
 See `.env` for the full list (generalize LLM, fallback LLM, hybrid keyword scores, etc.).
 

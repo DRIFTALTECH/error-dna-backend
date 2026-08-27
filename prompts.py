@@ -202,3 +202,96 @@ If the issue persists, open an SAP support ticket:
   URL: https://support.sap.com/en/my-support/message.html
   Component: [e.g., BC-MID-PCS for Cloud Integration]
   Attach: error message, MPL trace, adapter logs, tenant ID"""
+
+
+# ---------------------------------------------------------------------------
+# Ingest chain step 5 — article → structured knowledge base entry.
+# `error_signatures` + `search_text` exist for retrieval: diagnose queries are raw
+# error strings, so the stored chunk must contain error text phrased the way a user
+# pastes it. Both feed services.embeddings.build_blob().
+# ---------------------------------------------------------------------------
+
+SUMMARIZE_TEMPLATE = """You are a senior technical writer for a knowledge base. Rewrite the raw extraction of a technical support article into a clean, vendor-neutral knowledge base entry.
+
+CRITICAL RULES:
+1. IGNORE page navigation, breadcrumbs, UI labels, and chrome. Only read the BODY content.
+2. The real article title is inside the text — find it and use it (strip leading note numbers like "3780883 - ").
+3. The body starts near "Symptom" or "Description" — everything before that is page chrome, NOT the article.
+4. NEVER use the word "SAP", "SAP Note", "KBA", "SAP Knowledge Base Article", or any SAP product branding in the output.
+5. NEVER mention version numbers, release dates, or source identifiers.
+6. Use general technical language — rewrite vendor-specific terms generically (e.g. "Cloud Integration tenant" -> "integration platform").
+7. Write like a senior engineer explaining to a peer.
+8. Keep the title under 80 characters.
+9. Extracting is MORE IMPORTANT than sanitizing — get the content right before stripping branding.
+
+RETRIEVAL RULES (these two fields decide whether this article is ever found again):
+10. `error_signatures`: copy the literal failure strings from the article VERBATIM — exception class names, status codes, log lines, stack frames, error codes. Do NOT paraphrase and do NOT sanitize these; they are matched against text users paste. Empty array if the article contains none.
+11. `search_text`: one dense paragraph written the way an engineer describes the failure when asking for help — the symptom first, the literal error strings inline, then the cause and the fix in one line. No headings, no markdown, no branding.
+
+CLASSIFY into ONE error family CODE from this catalog (use the code exactly, e.g. OAUTH_TOKEN_REQUEST_FAILED):
+{family_catalog}
+{extra_rules}
+{format_instructions}
+
+ARTICLE:
+{article}
+{extra_context}
+"""
+
+# Appended to SUMMARIZE_TEMPLATE for community pages, which are often blogs.
+SUMMARIZE_SKIP_RULE = """
+NOT-A-SOLUTION CHECK: this source may be a blog, announcement, product news, opinion, roadmap, or general discussion rather than a specific technical PROBLEM with a concrete SOLUTION. If it is NOT a problem+solution, set is_solution to false and skip_reason to one short sentence, and leave every other field empty. Only fill the entry when there is a real problem AND its resolution.
+"""
+
+# Appended when the page carried images the model should place inline.
+SUMMARIZE_IMAGE_RULE = """
+IMAGES: the article has attached images, listed under ATTACHED IMAGES below. In `summary` and/or `steps`, insert the token {{image_N}} (e.g. {{image_1}}) on its OWN line at the single most relevant point for each image, judging from its context text. Use each token exactly once, never invent tokens, and keep the exact spelling so the app can swap in the real image.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Diagnose L1 — one raw error → the retrieval query plus its cluster identity.
+# `expanded_error` is what gets embedded and what both vector searches run on,
+# so it is written for retrieval, not for reading: verbatim codes and names are
+# the discriminative tokens. `error_signature` is the stable human label for the
+# cluster and is what the API returns as distinct_error.title.
+# ---------------------------------------------------------------------------
+
+ERROR_EXPAND_TEMPLATE = """You rewrite one integration error into a retrieval query for past closed incidents.
+
+Produce four fields.
+
+1. `expanded_error`
+Output: 2-4 sentences of plain text. No markdown. No bullets. No title.
+Must keep, verbatim when present:
+- the full error message
+- error / HTTP / exception codes
+- adapter, protocol, file path, system, interface names
+You may restate the symptom in plain words (what failed, where).
+Do not add:
+- fixes, steps, SAP Notes, URLs
+- systems, paths, or adapters not in the input
+- filler like "troubleshooting", "resolution", "how to fix"
+If the input is only a short error, repeat it and name the failure type. Nothing else.
+
+2. `error_signature`
+One short label naming this distinct error, under 80 characters. No ids, no
+timestamps, no GUIDs, no tenant names - two different runs of the same failure
+must produce the same signature.
+
+3. `family_code`
+ONE code from the catalog below, exactly as written. Pick UNCLASSIFIED_ERROR
+only when nothing else fits.
+
+4. `problem`
+One or two plain sentences saying what broke and where, for a human reading the
+result. No fixes, no speculation beyond the error text.
+
+FAMILY CATALOG:
+{family_catalog}
+
+{format_instructions}
+
+ERROR:
+{error_text}
+"""

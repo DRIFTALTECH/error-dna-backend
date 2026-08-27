@@ -1,10 +1,9 @@
 """SAP Community routes — mirrors the notes URL/summary endpoints, own tables.
 
 Public source: no credentials, no scheduler. URLs are added/pasted, then drained
-one-by-one through the browser scraper + LLM summarizer via services.community_ingest.
+one-by-one through services.ingest_chain (the same chain the notes pipeline uses).
 """
 
-import re
 from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel, Field
 
@@ -12,7 +11,7 @@ from db import read, write
 from models import PaginatedResponse
 from routes.summaries import _summary_to_ui, _embedding_status
 from services.error_families import FAMILY_JOIN
-from services import community_ingest
+from services import ingest_chain
 
 router = APIRouter(prefix="/api/community", tags=["community"])
 
@@ -20,8 +19,10 @@ router = APIRouter(prefix="/api/community", tags=["community"])
 def _derive_source_id(url: str) -> str:
     """SAP Community URLs end in .../{slug}-p/<id> (qaq-p, ba-p, td-p, m-p, ...).
     Use that id as the stable dedup key; fall back to the full URL."""
-    m = re.search(r"-p/(\d+)", url)
-    return m.group(1) if m else url.strip()
+    head, sep, tail = url.rstrip("/").rpartition("-p/")
+    if sep and tail.isdigit():
+        return tail
+    return url.strip()
 
 
 # ---- URLs -----------------------------------------------------------------
@@ -96,7 +97,7 @@ async def add_urls_bulk(body: CommunityBulkAdd):
     # Accept newline- or comma-separated blobs too (one paste = one entry).
     raw = []
     for entry in body.urls:
-        raw.extend(re.split(r"[\s,]+", entry.strip()))
+        raw.extend(entry.replace(",", " ").split())
     urls = [u for u in raw if u.startswith("http")]
     if not urls:
         raise HTTPException(400, "No valid http(s) URLs found")
@@ -139,7 +140,12 @@ async def ingest():
     """Kick a background drain. Loads and processes exactly one pending URL at a
     time (never the full queue); continues until pending is empty."""
     pending = (await read("SELECT COUNT(*) as c FROM community_urls WHERE status='pending'"))[0]["c"]
-    started = community_ingest.start_drain()
+    # Community signs in with the same SAP credential as the notes scraper now —
+    # without one every run stops at step 2 and requeues.
+    creds = (await read("SELECT COUNT(*) as c FROM credentials"))[0]["c"]
+    if not creds:
+        raise HTTPException(400, "No SAP credential configured — add one under Accounts first.")
+    started = ingest_chain.start_drain()
     return {"started": started, "already_running": not started, "pending": pending}
 
 
@@ -149,8 +155,8 @@ async def ingest_status():
     for st in ("pending", "scraping", "completed", "failed"):
         counts[st] = (await read("SELECT COUNT(*) as c FROM community_urls WHERE status=?", (st,)))[0]["c"]
     return {
-        "running": community_ingest.is_running(),
-        "current": community_ingest.current(),
+        "running": ingest_chain.is_draining(),
+        "current": ingest_chain.current(),
         **counts,
     }
 
@@ -272,7 +278,7 @@ class ChatBody(BaseModel):
 
 @router.post("/summaries/{summary_id}/chat")
 async def chat_summary(summary_id: int, body: ChatBody):
-    from services.summarizer import chat
+    from services.llm import chat
     rows = await read("SELECT * FROM community_summaries WHERE id = ?", (summary_id,))
     if not rows:
         raise HTTPException(404, "Summary not found")
