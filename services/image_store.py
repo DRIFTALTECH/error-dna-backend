@@ -4,6 +4,7 @@ Public API:
   save(data, ext, kind="img"|"doc") -> key
   url(key, filename=None) -> str
   delete(key) -> None
+  read(key) -> bytes | None
   read_local(key) -> bytes | None
 
 Keys: "img/<uuid>.<ext>" or "doc/<uuid>.<ext>". S3 → presigned GET; local → "/api/files/<key>".
@@ -91,6 +92,19 @@ def url(key: str, filename: str | None = None) -> str:
     return f"/api/files/{key}"
 
 
+def read(key: str) -> bytes | None:
+    """Bytes for a stored key. S3 get_object, else local disk."""
+    if not key:
+        return None
+    if using_s3():
+        try:
+            return _client().get_object(Bucket=S3_BUCKET, Key=key)["Body"].read()
+        except Exception as e:
+            logger.warning(f"s3 read failed for {key}: {e}")
+            return None
+    return read_local(key)
+
+
 def read_local(key: str) -> bytes | None:
     """Read local bytes for the FastAPI serving route (local mode only)."""
     path = os.path.join(_LOCAL_DIR, key)
@@ -119,6 +133,7 @@ if __name__ == "__main__":
     k = save(b"\x89PNG\r\n\x1a\n-test", "png")
     assert k.startswith("img/") and k.endswith(".png"), k
     assert read_local(k) == b"\x89PNG\r\n\x1a\n-test"
+    assert read(k) == b"\x89PNG\r\n\x1a\n-test"
     assert url(k) == f"/api/community/images/{k}"
     d = save(b"%PDF-test", "pdf", kind="doc")
     assert d.startswith("doc/") and url(d) == f"/api/files/{d}"

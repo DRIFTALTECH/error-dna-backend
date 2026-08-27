@@ -242,6 +242,21 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
 );
 
+-- Community vision: Gemini API keys (many, rotated) + one SAP AI Core row.
+-- secret_enc is Fernet (Gemini key or AI Core client_secret). extra is JSON, never the secret.
+CREATE TABLE IF NOT EXISTS vision_credentials (
+    id SERIAL PRIMARY KEY,
+    provider TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    secret_enc TEXT NOT NULL DEFAULT '',
+    extra TEXT NOT NULL DEFAULT '{}',
+    is_enabled INTEGER DEFAULT 1,
+    last_used_at TEXT,
+    last_error TEXT,
+    cooldown_until TEXT,
+    created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
+);
+
 -- OAuth 2.0 client_credentials clients (secret stored as pbkdf2 hash only).
 CREATE TABLE IF NOT EXISTS oauth_clients (
     id SERIAL PRIMARY KEY,
@@ -419,6 +434,22 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS error_events_created_idx ON error_events(created_at DESC);",
         ):
             await conn.execute(_stmt)
+        # Community vision — Gemini key pool + SAP AI Core. SCHEMA alone won't add it
+        # to DBs that already ran init.
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS vision_credentials (
+                id SERIAL PRIMARY KEY,
+                provider TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                secret_enc TEXT NOT NULL DEFAULT '',
+                extra TEXT NOT NULL DEFAULT '{}',
+                is_enabled INTEGER DEFAULT 1,
+                last_used_at TEXT,
+                last_error TEXT,
+                cooldown_until TEXT,
+                created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
+            )"""
+        )
         await conn.execute(SCHEDULER_SEED)
         await conn.execute(FIX_SEQUENCES)
     finally:

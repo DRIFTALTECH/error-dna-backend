@@ -1,14 +1,15 @@
 """The ingest chain — the single path from a queued URL to a stored, embedded note.
 
-One LCEL chain, seven steps, one failure path:
+One LCEL chain, eight steps, one failure path:
 
-  1 fetch_url   claim the next pending URL (atomic)
-  2 login       open it and clear the auth wall, or reuse the live session
-  3 open_page   verify the page is really on screen  (3.1 retry / 3.2 re-auth / 3.3 fail)
-  4 extract     pull the article text + attachments/images
-  5 summarize   PromptTemplate | ChatOpenAI | JsonOutputParser  → NoteSummary
-  6 embed       build the retrieval blob and vectorize it
-  7 persist     write summary + embedding + url status + run log
+  1 fetch_url         claim the next pending URL (atomic)
+  2 login             open it and clear the auth wall, or reuse the live session
+  3 open_page         verify the page is really on screen  (3.1 retry / 3.2 re-auth / 3.3 fail)
+  4 extract           pull the article text + attachments/images
+  4b describe_images  community only: vision caption + OCR (no-op on notes / when off)
+  5 summarize         PromptTemplate | ChatOpenAI | JsonOutputParser  → NoteSummary
+  6 embed             build the retrieval blob and vectorize it
+  7 persist           write summary + embedding + url status + run log
 
 Both sources (SAP notes, SAP Community) run this chain; `source` decides which
 tables it reads and writes and whether step 2 needs credentials.
@@ -348,8 +349,59 @@ def _image_context(briefs: list) -> str:
     lines = ["", "ATTACHED IMAGES (place each token where it best fits):"]
     for im in briefs:
         ctx = (im.get("context") or im.get("alt") or "").strip()[:300]
-        lines.append(f"- {{{im['ref']}}} — context: {ctx or '(no caption)'}")
+        cap = (im.get("caption") or "").strip()[:400]
+        ocr = (im.get("ocr_text") or "").strip()[:800]
+        bits = []
+        if ctx:
+            bits.append(f"context: {ctx}")
+        if cap:
+            bits.append(f"seen: {cap}")
+        if ocr:
+            bits.append(f"OCR: {ocr}")
+        lines.append(f"- {{{im['ref']}}} — {'; '.join(bits) or 'context: (no caption)'}")
     return "\n".join(lines)
+
+
+_MIME = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+         "gif": "image/gif", "webp": "image/webp"}
+
+
+async def describe_images(state: dict) -> dict:
+    """Community only. Notes return immediately. Vision miss is non-fatal."""
+    if state.get("source") != "community":
+        return state
+    briefs = state.get("image_briefs") or []
+    images = state.get("images") or {}
+    if not briefs:
+        return state
+    from services.vision import active_provider, describe as vision_describe
+    if await active_provider() == "off":
+        _rec(state, "describe_images", "info", "Vision off — text placement only")
+        return state
+
+    from services.image_store import read as blob_read
+    n_ok = 0
+    for brief in briefs:
+        meta = images.get(brief.get("ref") or "") or {}
+        key = meta.get("key") or ""
+        data = await asyncio.to_thread(blob_read, key) if key else None
+        if not data:
+            continue
+        ext = key.rsplit(".", 1)[-1].lower() if "." in key else "png"
+        try:
+            out = await vision_describe(data, _MIME.get(ext, "image/png"))
+        except Exception as e:
+            _rec(state, "describe_images", "warn",
+                 f"{brief.get('ref')} vision failed", str(e)[:200])
+            continue
+        if out.get("caption") or out.get("ocr_text"):
+            brief["caption"] = out.get("caption") or ""
+            brief["ocr_text"] = out.get("ocr_text") or ""
+            brief["kind"] = out.get("kind") or ""
+            n_ok += 1
+    _rec(state, "describe_images", "ok" if n_ok else "info",
+         f"Described {n_ok}/{len(briefs)} image(s)")
+    return state
 
 
 async def summarize(state: dict) -> dict:
@@ -522,6 +574,7 @@ CHAIN = (
     | step("2_login", login)
     | step("3_open_page", open_page)
     | step("4_extract", extract)
+    | step("4b_describe_images", describe_images)
     | step("5_summarize", summarize)
     | step("6_embed", embed)
     | step("7_persist", persist)
@@ -692,6 +745,8 @@ if __name__ == "__main__":
     assert _image_context([]) == ""
     ctx = _image_context([{"ref": "image_1", "context": "the error dialog"}])
     assert "{image_1}" in ctx and "the error dialog" in ctx
+    ctx_v = _image_context([{"ref": "image_1", "caption": "OAuth popup", "ocr_text": "HTTP 401"}])
+    assert "seen: OAuth popup" in ctx_v and "OCR: HTTP 401" in ctx_v
 
     # The prompt must render with every variable the chain supplies.
     rendered = PromptTemplate(
@@ -709,10 +764,10 @@ if __name__ == "__main__":
         assert cfg["blob_col"] in ("attachments", "images")
         assert cfg["target"] in ("note", "content")
 
-    # The chain must be all seven steps, in order.
+    # The chain must be all eight steps, in order. Notes no-op 4b.
     assert [s.name for s in CHAIN.steps] == [
         "1_fetch_url", "2_login", "3_open_page", "4_extract",
-        "5_summarize", "6_embed", "7_persist",
+        "4b_describe_images", "5_summarize", "6_embed", "7_persist",
     ]
 
     # ---- full run with every IO boundary stubbed -------------------------
@@ -765,10 +820,23 @@ if __name__ == "__main__":
     _fam.catalog_for_llm = lambda *a, **k: asyncio.sleep(0, "- HTTP_REQUEST_FAILED: x")
     import services.crypto as _crypto
     _crypto.decrypt = lambda _v: "pw"
+    import services.vision as _vision
+    vision_calls = {"n": 0}
+
+    async def _count_describe(*_a, **_k):
+        vision_calls["n"] += 1
+        return {"caption": "", "ocr_text": "", "kind": ""}
+
+    async def _provider_off():
+        return "off"
+
+    _vision.describe = _count_describe
+    _vision.active_provider = _provider_off
 
     globals()["CHAIN_STEP_DELAY_SEC"] = 0
     result = asyncio.run(run("notes"))
     assert result == {"status": "completed", "source_id": "3780883", "error": None}, result
+    assert vision_calls["n"] == 0, "notes must not call vision.describe"
 
     written = " || ".join(sql for sql, _ in sql_log)
     assert "INSERT INTO summaries" in written

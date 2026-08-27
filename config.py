@@ -91,6 +91,10 @@ EMBED_MODEL_ID = os.getenv("EMBED_MODEL_ID", "amazon.titan-embed-text-v2:0")
 EMBED_DIMENSIONS = int(os.getenv("EMBED_DIMENSIONS", "1024"))
 EMBED_REGION = os.getenv("EMBED_REGION", AWS_REGION)
 
+# Community vision (Gemini / SAP AI Core) — credentials live in the DB, not .env.
+VISION_TIMEOUT = float(os.getenv("VISION_TIMEOUT", "60"))
+VISION_COOLDOWN_SEC = int(os.getenv("VISION_COOLDOWN_SEC", "300"))
+
 # Server
 PORT = int(os.getenv("PORT", "3000"))
 HOST = os.getenv("HOST", "0.0.0.0")

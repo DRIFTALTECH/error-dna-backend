@@ -75,6 +75,8 @@ app.include_router(developer_router, dependencies=_auth)  # /api/developer/* —
 app.include_router(errors_router, dependencies=_auth)  # POST /api/errors/diagnose — Bearer required
 from routes.audit import router as audit_router
 app.include_router(audit_router, dependencies=_auth)  # /api/audit/* — per-client call trail
+from routes.vision import router as vision_router
+app.include_router(vision_router, dependencies=_auth)  # /api/vision/* — community image describe
 
 
 if __name__ == "__main__":
