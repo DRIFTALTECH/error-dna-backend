@@ -151,8 +151,10 @@ async def ingest():
 
 @router.get("/ingest/status")
 async def ingest_status():
+    # skipped is a real outcome, not a non-event: a thread with no answer or no
+    # concrete fix ends here. Leaving it out made the counters silently under-report.
     counts = {}
-    for st in ("pending", "scraping", "completed", "failed"):
+    for st in ("pending", "scraping", "completed", "failed", "skipped"):
         counts[st] = (await read("SELECT COUNT(*) as c FROM community_urls WHERE status=?", (st,)))[0]["c"]
     return {
         "running": ingest_chain.is_draining(),
