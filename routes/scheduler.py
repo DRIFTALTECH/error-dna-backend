@@ -110,9 +110,9 @@ async def rotate_account():
 
 @router.get("/embeddings")
 async def embeddings_status():
-    """Counts + live progress for the embedding backfill job (notes + community)."""
+    """Counts + live progress for the NOTES embedding backfill. Community has its own."""
     from services import embed_backfill
-    counts = await embed_backfill.counts()
+    counts = await embed_backfill.counts("notes")
     return {**counts, **embed_backfill.status()}
 
 
@@ -120,7 +120,7 @@ async def embeddings_status():
 async def embeddings_backfill():
     """Embed every latest note missing a vector — one by one in the background."""
     from services import embed_backfill
-    counts = await embed_backfill.counts()
+    counts = await embed_backfill.counts("notes")
     if counts["missing"] == 0:
         return {
             "started": False,
@@ -128,7 +128,7 @@ async def embeddings_backfill():
             "missing": 0,
             "message": "All notes already have embeddings",
         }
-    started = embed_backfill.start()
+    started = embed_backfill.start("notes")
     return {
         "started": started,
         "already_running": not started,

@@ -192,7 +192,8 @@ async def _find_solutions(vectors: list[str]) -> list[dict]:
         key=lambda h: h["score"],
         reverse=True,
     )[:ERROR_SOLUTION_LIMIT]
-    return await hydrate(ranked, with_blobs=False)
+    # with_blobs=True so community {image_N} tokens resolve via a per-solution URL map.
+    return await hydrate(ranked, with_blobs=True)
 
 
 # ---------------------------------------------------------------------------
@@ -214,10 +215,17 @@ def _slim_cautions(gotchas) -> list[str]:
 
 
 def _slim_solution(hit: dict) -> dict:
-    """problem / fix / cautions only — no note ids, no SAP metadata."""
+    """problem / fix / cautions / images — no note ids, no SAP metadata.
+
+    images is {image_N: {url, alt}} for community hits (empty {} for notes).
+    Client swaps {image_N} tokens in solution[] / whats_wrong using this map.
+    """
     fix = hit.get("how_to_fix")
     if not isinstance(fix, list):
         fix = [str(fix)] if fix else []
+    images = hit.get("images") or {}
+    if not isinstance(images, dict):
+        images = {}
     return {
         "title": hit.get("title") or "",
         "problem": hit.get("the_problem") or "",
@@ -225,6 +233,7 @@ def _slim_solution(hit: dict) -> dict:
         "solution": [str(s).strip() for s in fix if str(s).strip()],
         "cautions": _slim_cautions(hit.get("gotchas")),
         "match_percent": hit.get("match_percent"),
+        "images": images,
     }
 
 
@@ -425,6 +434,17 @@ if __name__ == "__main__":
 
     s = _slim_solution({"how_to_fix": "one step", "match_percent": 71})
     assert s["solution"] == ["one step"] and s["match_percent"] == 71
+    assert s["images"] == {}
+    s_img = _slim_solution({
+        "how_to_fix": ["see {image_1}"],
+        "match_percent": 90,
+        "images": {"image_1": {"url": "/api/community/images/img/a.png", "alt": ""}},
+    })
+    assert s_img["images"]["image_1"]["url"].endswith("a.png")
+    assert set(s_img) == {
+        "title", "problem", "whats_wrong", "solution", "cautions",
+        "match_percent", "images",
+    }
 
     async def _check_envelope():
         globals()["_family_name"] = lambda code: _done("HTTP failed")
@@ -442,6 +462,13 @@ if __name__ == "__main__":
         # summary is the problem text; an empty one falls back to the expanded error.
         body = await _envelope({**cluster, "summary": None}, 0.0, [], None)
         assert body["distinct_error"]["problem"] == "E"
+        # Community hit keeps a per-solution images map for {image_N} tokens.
+        body = await _envelope(cluster, 90.0, [{
+            "title": "T", "the_problem": "P", "whats_going_on": "W",
+            "how_to_fix": ["{image_1}"], "gotchas": [], "match_percent": 90,
+            "images": {"image_1": {"url": "/x", "alt": ""}},
+        }], None)
+        assert body["solutions"][0]["images"] == {"image_1": {"url": "/x", "alt": ""}}
 
     async def _done(v):
         return v

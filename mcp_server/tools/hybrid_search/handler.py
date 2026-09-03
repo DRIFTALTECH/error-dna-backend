@@ -56,7 +56,7 @@ async def _load_summaries(hits: list[dict], with_blobs: bool = True) -> dict[tup
     """Hydrate every hit in two queries, not one per hit.
 
     with_blobs=False skips image/attachment URL resolution (S3 presigning) for
-    callers that throw those fields away — the diagnose chain does.
+    callers that throw those fields away.
     """
     from routes.summaries import _resolve_attachments
 

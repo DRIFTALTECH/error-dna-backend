@@ -156,10 +156,33 @@ async def ingest_status():
     counts = {}
     for st in ("pending", "scraping", "completed", "failed", "skipped"):
         counts[st] = (await read("SELECT COUNT(*) as c FROM community_urls WHERE status=?", (st,)))[0]["c"]
+    from services import embed_backfill
+    emb = await embed_backfill.counts("community")
     return {
         "running": ingest_chain.is_draining(),
         "current": ingest_chain.current(),
         **counts,
+        "embedded": emb["embedded"],
+        "embed_missing": emb["missing"],
+        "embed_running": embed_backfill.is_running(),
+    }
+
+
+@router.post("/embeddings/backfill")
+async def embeddings_backfill():
+    """Embed every community summary whose vector is missing or stale."""
+    from services import embed_backfill
+    counts = await embed_backfill.counts("community")
+    if counts["missing"] == 0:
+        return {"started": False, "already_running": False, "missing": 0,
+                "message": "Every community summary already has an embedding"}
+    started = embed_backfill.start("community")
+    return {
+        "started": started,
+        "already_running": not started,
+        "missing": counts["missing"],
+        "message": (f"Backfilling {counts['missing']} summary(s)…" if started
+                    else "A backfill is already running"),
     }
 
 
@@ -240,11 +263,16 @@ async def list_summaries(
     offset = (page - 1) * page_size
     total = (await read(f"SELECT COUNT(*) as c FROM community_summaries {where_sql}", params))[0]["c"]
     rows = await read(
-        f"SELECT * FROM community_summaries {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        f"""SELECT *, EXISTS (
+              SELECT 1 FROM summary_embeddings e
+              WHERE e.source = 'community' AND e.summary_id = community_summaries.id
+            ) AS embedded
+            FROM community_summaries {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?""",
         params + [page_size, offset],
     )
     return PaginatedResponse(
-        data=[_summary_to_ui(r) for r in rows], total=total, page=page,
+        data=[{**_summary_to_ui(r), "embedded": bool(r["embedded"])} for r in rows],
+        total=total, page=page,
         page_size=page_size, total_pages=max(1, (total + page_size - 1) // page_size),
     )
 

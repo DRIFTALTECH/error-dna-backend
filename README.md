@@ -115,7 +115,7 @@ You send error text
 | `distinct_error.family_code` / `family_name` | Broad error category |
 | `distinct_error.cluster_confidence` | `100.0` exact repeat · similarity % on a cluster match · `0.0` for a brand-new cluster |
 | `distinct_error.informational` | Always `false` |
-| `solutions[]` | Up to 10 knowledge base fixes: `title`, `problem`, `whats_wrong`, `solution[]`, `cautions[]`, `match_percent` |
+| `solutions[]` | Up to 10 knowledge base fixes: `title`, `problem`, `whats_wrong`, `solution[]`, `cautions[]`, `match_percent`, `images` (`{image_N: {url, alt}}` for community; `{}` for notes — swap `{image_N}` tokens in the text) |
 | `fallback_solution` | LLM markdown answer. **Present only when `solutions` is empty** |
 
 | Status | When |
